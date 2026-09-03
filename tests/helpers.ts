@@ -46,6 +46,7 @@ export function mockChatwoot(): MockChatwoot {
   return {
     upsertContact: vi.fn(async ({ identifier }: { identifier: string }) => ({ id: 1, source_id: `src-${identifier}` })),
     createConversation: vi.fn(async () => ({ id: 42, inbox_id: 1 })),
+    updateContact: vi.fn(async () => undefined),
     createContactMessage: vi.fn(async () => ({ id: nextMessageId++, content: "", message_type: 0, conversation_id: 42 })),
     listContactConversations: vi.fn(async () => [{ id: 42, inbox_id: 1, status: "open" }]),
     toggleStatusAsContact: vi.fn(async () => undefined),

@@ -169,6 +169,11 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob): 
           slackAuthorId: job.user,
         });
         log.info("created conversation", { bridge: bridge.row.name, conversationId: conversation.id, channel: job.channel, ts: job.ts });
+        // Keep the Chatwoot contact looking like the Slack user: the public create call doesn't
+        // update existing contacts, and Chatwoot may have swapped in a Gravatar. Best effort.
+        await chatwoot.updateContact(contact.id, { name: author.name, avatarUrl: author.avatarUrl }).catch((err) => {
+          log.warn("could not refresh contact avatar", { contactId: contact.id, error: err instanceof Error ? err.message : String(err) });
+        });
       }
       const message = await chatwoot.createContactMessage(thread.chatwootContactSourceId, thread.chatwootConversationId, text, attachments, job.ts);
       await recordRelayed(db, { slackChannel: job.channel, slackTs: job.ts, chatwootMessageId: message.id, direction: "slack_to_chatwoot" });

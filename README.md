@@ -67,6 +67,7 @@ For the other direction — Slack replies attributed to them in Chatwoot — an 
 - Slack attachments are downloaded with the bot token and re-uploaded to Chatwoot (≤ 40 MB). Chatwoot attachments are posted to Slack as links.
 - Replies in threads that predate the bridge are ignored. Replies from someone other than the original poster are prefixed `**[Not OP] Name:**`.
 - Chatwoot reopens resolved conversations itself when the contact writes again; the bridge does nothing special.
+- Contacts carry the Slack display name and avatar; both are refreshed on every new thread. Chatwoot also looks up Gravatar for contacts with an email, so on a self-hosted Chatwoot set `DISABLE_GRAVATAR=true` if you want Slack avatars to be the only source.
 - Tokens (Slack user tokens, Chatwoot access tokens) are AES-256-GCM encrypted with `TOKEN_ENCRYPTION_KEY`.
 
 ## Development

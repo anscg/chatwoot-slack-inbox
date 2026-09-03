@@ -131,6 +131,19 @@ export class ChatwootClient {
     return this.json<ChatwootMessage>("POST", url, { form });
   }
 
+  /**
+   * Refresh a contact's name/avatar (Application API). Chatwoot downloads `avatar_url` in a
+   * background job; because this runs after contact creation it also beats the Gravatar
+   * lookup Chatwoot starts for contacts that have an email.
+   */
+  async updateContact(contactId: number, input: { name?: string; avatarUrl?: string }, apiToken?: string): Promise<void> {
+    const body: Record<string, unknown> = {};
+    if (input.name) body.name = input.name;
+    if (input.avatarUrl) body.avatar_url = input.avatarUrl;
+    if (Object.keys(body).length === 0) return;
+    await this.json<unknown>("PATCH", `${this.appBase}/contacts/${contactId}`, { token: apiToken ?? this.opts.apiToken, body });
+  }
+
   /** All conversations for a contact in this inbox (public API), incl. `status`. */
   async listContactConversations(sourceId: string): Promise<PublicConversation[]> {
     return this.json<PublicConversation[]>("GET", `${this.publicBase}/contacts/${encodeURIComponent(sourceId)}/conversations`);
@@ -206,7 +219,7 @@ export class ChatwootClient {
   // ---------- plumbing ----------
 
   private async json<T = unknown>(
-    method: "GET" | "POST" | "PUT" | "DELETE",
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
     url: string,
     init: { token?: string; body?: unknown; form?: FormData } = {},
   ): Promise<T> {

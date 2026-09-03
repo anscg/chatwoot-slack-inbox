@@ -28,6 +28,8 @@ describe("Slack -> Chatwoot", () => {
       avatarUrl: "https://avatars.test/U_ALICE.png",
     });
     expect(bridge.chatwootMock.createConversation).toHaveBeenCalledWith("src-U_ALICE");
+    // Contact refreshed after creation so the Slack avatar/name win over Gravatar or stale data.
+    expect(bridge.chatwootMock.updateContact).toHaveBeenCalledWith(1, { name: "Name U_ALICE", avatarUrl: "https://avatars.test/U_ALICE.png" });
     expect(bridge.chatwootMock.createContactMessage).toHaveBeenCalledWith("src-U_ALICE", 42, "help me @Name U_BOB & co", [], "1700000000.000100");
 
     const t = await bridge.db.select().from(threads);
