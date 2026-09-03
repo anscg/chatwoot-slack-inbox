@@ -36,6 +36,8 @@ export const bridges = pgTable(
     reopenButtonLabel: text("reopen_button_label"),
     resolveMessage: text("resolve_message"),
     reopenMessage: text("reopen_message"),
+    /** Private prompt shown to someone whose reply reopened a resolved ticket; null disables. */
+    reopenPromptMessage: text("reopen_prompt_message"),
     enabled: boolean("enabled").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

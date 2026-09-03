@@ -116,6 +116,7 @@ export interface BridgeOverrides {
   reactionAssign?: string | null;
   resolvedEmoji?: string | null;
   welcomeMessage?: string | null;
+  reopenPromptMessage?: string | null;
   resolveButtonLabel?: string | null;
   reopenButtonLabel?: string | null;
 }
@@ -163,6 +164,8 @@ export async function addBridge(ctx: TestContext, over: BridgeOverrides, chatwoo
     reopenButtonLabel: over.reopenButtonLabel === undefined ? "Reopen" : over.reopenButtonLabel,
     resolveMessage: ":neocat: Help request marked as resolved.",
     reopenMessage: "Thread reopened.",
+    reopenPromptMessage:
+      over.reopenPromptMessage === undefined ? "Your message reopened this help ticket. Do you have a question, or is it accidental?" : over.reopenPromptMessage,
     chatwootApiTokenEnc: encryptToken("service-token", TEST_KEY),
     reactionResolve: over.reactionResolve === undefined ? "white_check_mark" : over.reactionResolve,
     reactionAssign: over.reactionAssign === undefined ? "eyes" : over.reactionAssign,

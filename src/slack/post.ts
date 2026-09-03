@@ -276,8 +276,15 @@ export async function updateSystemMessage(bridge: Bridge, channel: string, ts: s
  * the channel rather than the thread, so post the ephemeral message explicitly instead. Not
  * throttled: it is feedback for a click, and ephemerals don't broadcast.
  */
-export async function postEphemeralInThread(bridge: Bridge, channel: string, threadTs: string, user: string, text: string): Promise<void> {
-  await bridge.slack.chat.postEphemeral({ channel, thread_ts: threadTs, user, text });
+export async function postEphemeralInThread(
+  bridge: Bridge,
+  channel: string,
+  threadTs: string,
+  user: string,
+  text: string,
+  blocks?: KnownBlock[],
+): Promise<void> {
+  await bridge.slack.chat.postEphemeral({ channel, thread_ts: threadTs, user, text, ...(blocks ? { blocks } : {}) });
 }
 
 interface ReplyRef {

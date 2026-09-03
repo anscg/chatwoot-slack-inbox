@@ -5,3 +5,9 @@ export const DEFAULT_REOPEN_MESSAGE = "Thread reopened.";
 export const DEFAULT_RESOLVE_BUTTON_LABEL = "Resolve";
 export const DEFAULT_REOPEN_BUTTON_LABEL = "Reopen";
 export const DEFAULT_RESOLVED_EMOJI = "white_check_mark";
+
+/** Shown privately to whoever reopened a resolved ticket by replying. */
+export const DEFAULT_REOPEN_PROMPT =
+  "Your message reopened this help ticket. Do you have a question, or is it accidental?";
+export const REOPEN_PROMPT_ACCIDENTAL_LABEL = "No, I don't have a question";
+export const REOPEN_PROMPT_KEEP_LABEL = "I have a question, reopen";

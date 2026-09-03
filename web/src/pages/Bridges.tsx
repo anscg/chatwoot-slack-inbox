@@ -19,6 +19,7 @@ interface Draft {
   reopenButtonLabel: string;
   resolveMessage: string;
   reopenMessage: string;
+  reopenPromptMessage: string;
   enabled: boolean;
 }
 
@@ -39,6 +40,7 @@ const EMPTY: Draft = {
   reopenButtonLabel: "",
   resolveMessage: "",
   reopenMessage: "",
+  reopenPromptMessage: "",
   enabled: true,
 };
 
@@ -65,6 +67,7 @@ function fromBridge(b: Bridge): Draft {
     reopenButtonLabel: b.reopenButtonLabel ?? "",
     resolveMessage: b.resolveMessage ?? "",
     reopenMessage: b.reopenMessage ?? "",
+    reopenPromptMessage: b.reopenPromptMessage ?? "",
     enabled: b.enabled,
   };
 }
@@ -236,6 +239,7 @@ function CheckPanel({ check, onClose }: { check: BridgeCheck | "loading"; onClos
             }
           />
           <Row ok={b.welcomeMessage} label="Welcome message" detail={b.welcomeMessage ? "set" : "off"} />
+          <Row ok={b.reopenPromptMessage} label="Accidental-reopen prompt" detail={b.reopenPromptMessage ? "set" : "off"} />
           <Row ok={b.resolveMessage && b.reopenMessage} label="Resolved / reopened notices" detail={`${b.resolveMessage ? "resolved set" : "resolved off"}, ${b.reopenMessage ? "reopened set" : "reopened off"}`} />
         </tbody>
       </table>
@@ -353,6 +357,7 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
       reopenButtonLabel: d.reopenButtonLabel,
       resolveMessage: d.resolveMessage,
       reopenMessage: d.reopenMessage,
+      reopenPromptMessage: d.reopenPromptMessage,
       enabled: d.enabled,
     };
     try {
@@ -536,6 +541,11 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
         <div className="field">
           <label>Reopened message (replaces the resolved message)</label>
           <textarea rows={2} value={d.reopenMessage} onChange={set("reopenMessage")} />
+        </div>
+        <div className="field" style={{ gridColumn: "1 / -1" }}>
+          <label>Private prompt when someone's reply reopens a resolved ticket (blank = off)</label>
+          <textarea rows={2} value={d.reopenPromptMessage} onChange={set("reopenPromptMessage")} />
+          <p className="note">Only that person sees it, with a green button that resolves the ticket again and a red one that keeps it open.</p>
         </div>
       </div>
 

@@ -50,6 +50,13 @@
       "when": 1788442671116,
       "tag": "0006_thread_deleted",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788445918280,
+      "tag": "0007_reopen_prompt",
+      "breakpoints": true
     }
   ]
 }

@@ -9,7 +9,7 @@ import { recentTraffic } from "../diagnostics.js";
 import { encryptToken } from "../crypto.js";
 import { agents, bridges, relayed, retries, threads } from "../db/schema.js";
 import { log } from "../logger.js";
-import { DEFAULT_REOPEN_BUTTON_LABEL, DEFAULT_REOPEN_MESSAGE, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_MESSAGE, DEFAULT_RESOLVED_EMOJI, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
+import { DEFAULT_REOPEN_BUTTON_LABEL, DEFAULT_REOPEN_MESSAGE, DEFAULT_REOPEN_PROMPT, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_MESSAGE, DEFAULT_RESOLVED_EMOJI, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
 import { ADMIN_COOKIE, parseCookies, Signer, type AdminSession } from "../session.js";
 import { bridgeManifest, SLUG_RE, slugify } from "../slack/manifest.js";
 
@@ -70,6 +70,7 @@ const bridgeInput = z.object({
   reopenButtonLabel: buttonLabelField,
   resolveMessage: messageField,
   reopenMessage: messageField,
+  reopenPromptMessage: messageField,
   enabled: z.boolean().optional(),
 });
 
@@ -123,6 +124,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
         reopenButtonLabel: DEFAULT_REOPEN_BUTTON_LABEL,
         resolveMessage: DEFAULT_RESOLVE_MESSAGE,
         reopenMessage: DEFAULT_REOPEN_MESSAGE,
+        reopenPromptMessage: DEFAULT_REOPEN_PROMPT,
       },
     });
   });
@@ -203,6 +205,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           reopenButtonLabel: d.reopenButtonLabel === undefined ? DEFAULT_REOPEN_BUTTON_LABEL : d.reopenButtonLabel,
           resolveMessage: d.resolveMessage === undefined ? DEFAULT_RESOLVE_MESSAGE : d.resolveMessage,
           reopenMessage: d.reopenMessage === undefined ? DEFAULT_REOPEN_MESSAGE : d.reopenMessage,
+          reopenPromptMessage: d.reopenPromptMessage === undefined ? DEFAULT_REOPEN_PROMPT : d.reopenPromptMessage,
           enabled: d.enabled ?? true,
         })
         .returning();
@@ -258,6 +261,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           ...(d.reopenButtonLabel !== undefined ? { reopenButtonLabel: d.reopenButtonLabel } : {}),
           ...(d.resolveMessage !== undefined ? { resolveMessage: d.resolveMessage } : {}),
           ...(d.reopenMessage !== undefined ? { reopenMessage: d.reopenMessage } : {}),
+          ...(d.reopenPromptMessage !== undefined ? { reopenPromptMessage: d.reopenPromptMessage } : {}),
           ...(d.enabled !== undefined ? { enabled: d.enabled } : {}),
           updatedAt: new Date(),
         })
@@ -294,6 +298,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           welcomeMessage: Boolean(row.welcomeMessage),
           resolveMessage: Boolean(row.resolveMessage),
           reopenMessage: Boolean(row.reopenMessage),
+          reopenPromptMessage: Boolean(row.reopenPromptMessage),
         },
       };
       const [{ n: threadCount } = { n: 0 }] = await db

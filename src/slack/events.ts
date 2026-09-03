@@ -9,7 +9,7 @@ import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
 import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, markThreadDeleted, recordRelayed, setWelcomeMessageTs } from "../store.js";
 import { downloadSlackFiles, type SlackFileRef } from "./files.js";
-import { buttonForStatus, parseButtonValue, RESOLVE_ACTION_ID, messageBlocks, type ButtonAction } from "./blocks.js";
+import { buttonForStatus, KEEP_OPEN_ACTION_ID, messageBlocks, NOT_A_QUESTION_ACTION_ID, parseButtonValue, reopenPromptBlocks, RESOLVE_ACTION_ID, type ButtonAction } from "./blocks.js";
 import { BRIDGE_METADATA_EVENT, deleteBridgeOnlyThread, postEphemeralInThread, postSystemMessage } from "./post.js";
 import { slackToChatwootText } from "./text.js";
 import { getSlackProfile, messageStillExists } from "./users.js";
@@ -314,6 +314,18 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, g
       const content = job.user === thread.slackAuthorId ? text : `**[Not OP] ${author.name}:** ${text}`;
       const message = await chatwoot.createContactMessage(thread.chatwootContactSourceId, thread.chatwootConversationId, content, attachments, job.ts);
       messageId = message.id;
+      // Chatwoot reopens a resolved conversation on any incoming message, so this reply just did.
+      // Ask the sender, privately, whether they meant to. Only they can see or answer it.
+      if (thread.lastStatus === "resolved" && bridge.row.reopenPromptMessage) {
+        await postEphemeralInThread(
+          bridge,
+          job.channel,
+          thread.slackThreadTs,
+          job.user,
+          bridge.row.reopenPromptMessage,
+          reopenPromptBlocks(bridge.row.reopenPromptMessage, thread.slackThreadTs),
+        ).catch((err) => log.warn("could not ask about the reopen", { channel: job.channel, error: err instanceof Error ? err.message : String(err) }));
+      }
     }
     await recordRelayed(db, { slackChannel: job.channel, slackTs: job.ts, chatwootMessageId: messageId, direction: "slack_to_chatwoot" });
   } catch (err) {
@@ -420,6 +432,33 @@ export function registerSlackEvents(app: App, ctx: AppContext, bridgeId: number)
     await postEphemeralInThread(bridge, channel, parsed.threadTs, user, problem ?? done).catch((err) =>
       log.warn("could not answer thread button click", { error: err instanceof Error ? err.message : String(err) }),
     );
+  });
+
+  // Answers to the "did you mean to reopen this?" prompt. The prompt is ephemeral, so replacing it
+  // through the response_url is both correct and private.
+  app.action({ action_id: NOT_A_QUESTION_ACTION_ID }, async ({ ack, body, respond }) => {
+    await ack();
+    const b = body as unknown as { user?: { id?: string }; channel?: { id?: string }; trigger_id?: string; actions?: { value?: string }[] };
+    const channel = b.channel?.id;
+    const user = b.user?.id;
+    const threadTs = b.actions?.[0]?.value;
+    if (!channel || !user || !threadTs) return;
+    const problem = await acceptResolveButton(ctx, { channel, threadTs, user, action: "resolve", triggerId: b.trigger_id ?? `${channel}:${threadTs}:${user}` });
+    await respond({
+      response_type: "ephemeral",
+      replace_original: true,
+      text: problem ?? "Thanks, marking this as resolved again.",
+    }).catch((err) => log.warn("could not answer the reopen prompt", { error: err instanceof Error ? err.message : String(err) }));
+  });
+
+  app.action({ action_id: KEEP_OPEN_ACTION_ID }, async ({ ack, body, respond }) => {
+    await ack();
+    // Nothing to do: Chatwoot has already reopened it. Just acknowledge, privately.
+    await respond({
+      response_type: "ephemeral",
+      replace_original: true,
+      text: "Kept open. A helper will take a look.",
+    }).catch((err) => log.warn("could not answer the reopen prompt", { error: err instanceof Error ? err.message : String(err) }));
   });
 
   app.event("reaction_added", async ({ event, body }) => {
