@@ -100,3 +100,7 @@ export async function upsertAgent(db: Db, row: typeof agents.$inferInsert): Prom
   if (!out) throw new Error("agent upsert returned no row");
   return out;
 }
+
+export async function setThreadStatus(db: Db, threadId: number, patch: { lastStatus: string; statusMessageTs: string | null }): Promise<void> {
+  await db.update(threads).set(patch).where(eq(threads.id, threadId));
+}

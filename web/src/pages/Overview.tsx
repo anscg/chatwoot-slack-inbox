@@ -21,7 +21,7 @@ export function Overview({ me }: { me: Me }) {
         <h2>Setup</h2>
         <p>
           <strong>Chatwoot webhook.</strong> In each bridged Chatwoot account: Settings → Integrations → Webhooks → add this URL and subscribe to{" "}
-          <code>message_created</code>.
+          <code>message_created</code> and <code>conversation_status_changed</code>.
         </p>
         {data && <Copy value={data.webhookUrl} />}
         <p style={{ marginTop: 16 }}>

@@ -33,7 +33,7 @@ There are two kinds of Slack app: one **hub** app (sign-in, agent linking, user 
 2. **Create the hub Slack app.** Open `${PUBLIC_URL}/setup` (no sign-in) and download the hub manifest, pre-filled with your redirect URLs — or use [`slack-manifest-hub.yml`](slack-manifest-hub.yml) and replace `bridge.example.com`. At <https://api.slack.com/apps> choose *Create New App → From a manifest*, install it, then put its bot token, client ID and client secret into `.env` and restart.
 3. **Create a Chatwoot API inbox** for the event/team: *Settings → Inboxes → Add inbox → API*.
 4. **Open the control panel** at `${PUBLIC_URL}/admin/`, sign in with Slack, click *New bridge*. The form walks through it: name → copy the generated manifest and create that team's Slack app from it → paste its bot token + signing secret → pick the channel (invite the bot first) → paste a Chatwoot *service agent* access token (Profile settings → Access token), pick the account and API inbox → choose or disable the ✅/👀 reactions.
-5. **Add the Chatwoot webhook** in each bridged account: *Settings → Integrations → Webhooks*, URL shown on the panel's Overview page (`${PUBLIC_URL}/webhooks/chatwoot/<secret>`), event `message_created`.
+5. **Add the Chatwoot webhook** in each bridged account: *Settings → Integrations → Webhooks*, URL shown on the panel's Overview page (`${PUBLIC_URL}/webhooks/chatwoot/<secret>`), events `message_created` and `conversation_status_changed`.
 
 Post in the channel; a conversation should appear in Chatwoot.
 
@@ -65,6 +65,7 @@ For the other direction — Slack replies attributed to them in Chatwoot — an 
 - Every relayed message is recorded (`relayed` table) so nothing echoes back. Messages the bridge posts to Slack also carry a metadata marker.
 - Any failed outbound call is queued in Postgres and retried with exponential backoff (30s → 1h, 8 attempts), including honoring Slack `Retry-After`. Posts are throttled to ~1/sec/channel.
 - Attachments go both ways as real files (≤ 40 MB): Slack files are downloaded with the bridge bot and attached to the Chatwoot message; Chatwoot attachments are uploaded into the Slack thread with `files.uploadV2`, as the agent when their linked token has `files:write`, else by the bot with the agent named. If a download or upload fails the file is posted as a link instead.
+- The bridge bot posts a welcome message in each new thread, a "resolved" notice when the conversation is resolved (from Slack or Chatwoot), and swaps it for a "reopened" notice if the conversation reopens. All three texts are per-bridge settings; blank disables.
 - Replies in threads that predate the bridge are ignored. Replies from someone other than the original poster are prefixed `**[Not OP] Name:**`.
 - Chatwoot reopens resolved conversations itself when the contact writes again; the bridge does nothing special.
 - Contacts carry the Slack display name and avatar; both are refreshed on every new thread. Chatwoot also looks up Gravatar for contacts with an email, so on a self-hosted Chatwoot set `DISABLE_GRAVATAR=true` if you want Slack avatars to be the only source.

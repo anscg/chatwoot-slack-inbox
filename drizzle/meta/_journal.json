@@ -15,6 +15,13 @@
       "when": 1788432934932,
       "tag": "0001_relayed_files",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788434096738,
+      "tag": "0002_status_messages",
+      "breakpoints": true
     }
   ]
 }

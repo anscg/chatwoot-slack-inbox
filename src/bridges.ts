@@ -3,6 +3,7 @@ import { WebClient } from "@slack/web-api";
 import { ChatwootClient } from "./chatwoot/client.js";
 import { decryptToken } from "./crypto.js";
 import type { Db } from "./db/client.js";
+import { eq } from "drizzle-orm";
 import { bridges, type BridgeRow } from "./db/schema.js";
 import { log } from "./logger.js";
 
@@ -92,6 +93,7 @@ export class BridgeRegistry {
   }
 
   private async build(row: BridgeRow): Promise<Bridge> {
+    // eslint-disable-next-line prefer-const
     const apiToken = decryptToken(row.chatwootApiTokenEnc, this.opts.encryptionKey);
     const botToken = decryptToken(row.slackBotTokenEnc, this.opts.encryptionKey);
     const signingSecret = decryptToken(row.slackSigningSecretEnc, this.opts.encryptionKey);
@@ -115,6 +117,18 @@ export class BridgeRegistry {
     this.opts.onBoltApp?.(bolt, row.id);
 
     const chatwoot = this.chatwootFor(row);
+    if (row.chatwootInboxId === null) {
+      // Older rows: look the numeric inbox id up once so status webhooks can be attributed.
+      try {
+        const inbox = (await chatwoot.listInboxes(row.chatwootAccountId, apiToken)).find((i) => i.inbox_identifier === row.chatwootInboxIdentifier);
+        if (inbox) {
+          await this.db.update(bridges).set({ chatwootInboxId: inbox.id }).where(eq(bridges.id, row.id));
+          row = { ...row, chatwootInboxId: inbox.id };
+        }
+      } catch (err) {
+        log.warn("could not backfill chatwoot inbox id", { bridge: row.name, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
     log.info("bridge loaded", { bridge: row.name, slug: row.slug, channel: row.slackChannel, botUserId, enabled: row.enabled });
     return { row, chatwoot, apiToken, slack, botToken, botId, botUserId, bolt, receiver };
   }

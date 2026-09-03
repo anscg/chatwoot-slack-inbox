@@ -8,6 +8,7 @@ import type { AppContext } from "../context.js";
 import { encryptToken } from "../crypto.js";
 import { agents, bridges, relayed, retries, threads } from "../db/schema.js";
 import { log } from "../logger.js";
+import { DEFAULT_REOPEN_MESSAGE, DEFAULT_RESOLVE_MESSAGE, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
 import { ADMIN_COOKIE, parseCookies, Signer, type AdminSession } from "../session.js";
 import { bridgeManifest, SLUG_RE, slugify } from "../slack/manifest.js";
 
@@ -17,6 +18,14 @@ const reactionField = z
   .transform((s) => s.replace(/^:|:$/g, ""))
   .refine((s) => s === "" || /^[a-z0-9_+'-]+$/i.test(s), "emoji short name only, e.g. white_check_mark")
   .transform((s) => (s === "" ? null : s))
+  .nullable()
+  .optional();
+
+/** Bot message text; blank disables (stored as null). */
+const messageField = z
+  .string()
+  .max(2000)
+  .transform((s) => (s.trim() === "" ? null : s.trim()))
   .nullable()
   .optional();
 
@@ -32,6 +41,9 @@ const bridgeInput = z.object({
   chatwootApiToken: z.string().trim().min(1).optional(),
   reactionResolve: reactionField,
   reactionAssign: reactionField,
+  welcomeMessage: messageField,
+  resolveMessage: messageField,
+  reopenMessage: messageField,
   enabled: z.boolean().optional(),
 });
 
@@ -74,7 +86,12 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   const enc = (v: string) => encryptToken(v, config.TOKEN_ENCRYPTION_KEY);
 
   api.get("/me", (req, res) => {
-    res.json({ user: (req as Request & { admin: AdminSession }).admin, chatwootBaseUrl: config.CHATWOOT_BASE_URL, publicUrl: config.PUBLIC_URL });
+    res.json({
+      user: (req as Request & { admin: AdminSession }).admin,
+      chatwootBaseUrl: config.CHATWOOT_BASE_URL,
+      publicUrl: config.PUBLIC_URL,
+      defaults: { welcomeMessage: DEFAULT_WELCOME_MESSAGE, resolveMessage: DEFAULT_RESOLVE_MESSAGE, reopenMessage: DEFAULT_REOPEN_MESSAGE },
+    });
   });
 
   api.get(
@@ -127,7 +144,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
       if (!d.chatwootApiToken) return badRequest(res, "chatwootApiToken is required");
       if (!d.slackBotToken || !d.slackSigningSecret) return badRequest(res, "slackBotToken and slackSigningSecret are required");
       const cw = await verifyServiceToken(introspectClient(d.chatwootApiToken), d.chatwootAccountId, d.chatwootInboxIdentifier);
-      if (cw) return badRequest(res, cw);
+      if (typeof cw === "string") return badRequest(res, cw);
       const bot = await verifyBotToken(slackClient(d.slackBotToken), d.slackChannel);
       if ("error" in bot) return badRequest(res, bot.error);
       const [row] = await db
@@ -143,9 +160,13 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           slackTeamId: bot.teamId,
           chatwootAccountId: d.chatwootAccountId,
           chatwootInboxIdentifier: d.chatwootInboxIdentifier,
+          chatwootInboxId: cw.inboxId,
           chatwootApiTokenEnc: enc(d.chatwootApiToken),
           reactionResolve: d.reactionResolve === undefined ? "white_check_mark" : d.reactionResolve,
           reactionAssign: d.reactionAssign === undefined ? "eyes" : d.reactionAssign,
+          welcomeMessage: d.welcomeMessage === undefined ? DEFAULT_WELCOME_MESSAGE : d.welcomeMessage,
+          resolveMessage: d.resolveMessage === undefined ? DEFAULT_RESOLVE_MESSAGE : d.resolveMessage,
+          reopenMessage: d.reopenMessage === undefined ? DEFAULT_REOPEN_MESSAGE : d.reopenMessage,
           enabled: d.enabled ?? true,
         })
         .returning();
@@ -167,9 +188,11 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
       const accountId = d.chatwootAccountId ?? existing.chatwootAccountId;
       const inbox = d.chatwootInboxIdentifier ?? existing.chatwootInboxIdentifier;
       const channel = d.slackChannel ?? existing.slackChannel;
+      let inboxId: number | undefined;
       if (d.chatwootApiToken) {
         const cw = await verifyServiceToken(introspectClient(d.chatwootApiToken), accountId, inbox);
-        if (cw) return badRequest(res, cw);
+        if (typeof cw === "string") return badRequest(res, cw);
+        inboxId = cw.inboxId;
       }
       let botIds: { botId: string; botUserId: string; teamId?: string; warning?: string } | undefined;
       let warning: string | undefined;
@@ -189,9 +212,13 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           ...(d.slackSigningSecret ? { slackSigningSecretEnc: enc(d.slackSigningSecret) } : {}),
           chatwootAccountId: accountId,
           chatwootInboxIdentifier: inbox,
+          ...(inboxId !== undefined ? { chatwootInboxId: inboxId } : inbox !== existing.chatwootInboxIdentifier ? { chatwootInboxId: null } : {}),
           ...(d.chatwootApiToken ? { chatwootApiTokenEnc: enc(d.chatwootApiToken) } : {}),
           ...(d.reactionResolve !== undefined ? { reactionResolve: d.reactionResolve } : {}),
           ...(d.reactionAssign !== undefined ? { reactionAssign: d.reactionAssign } : {}),
+          ...(d.welcomeMessage !== undefined ? { welcomeMessage: d.welcomeMessage } : {}),
+          ...(d.resolveMessage !== undefined ? { resolveMessage: d.resolveMessage } : {}),
+          ...(d.reopenMessage !== undefined ? { reopenMessage: d.reopenMessage } : {}),
           ...(d.enabled !== undefined ? { enabled: d.enabled } : {}),
           updatedAt: new Date(),
         })
@@ -459,15 +486,16 @@ export async function listChatwootAgents(ctx: AppContext): Promise<ChatwootAgent
   return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Does this token belong to a member of `accountId`, and does that account have an API inbox with this identifier? */
-async function verifyServiceToken(client: ChatwootClient, accountId: number, inboxIdentifier: string): Promise<string | null> {
+/** Does this token belong to a member of `accountId`, and does that account have an API inbox with this identifier? Returns an error string or the inbox id. */
+async function verifyServiceToken(client: ChatwootClient, accountId: number, inboxIdentifier: string): Promise<string | { inboxId: number }> {
   const token = client["opts"].apiToken;
   try {
     const profile = await client.whoAmI(token);
     if (profile.accounts && !profile.accounts.some((a) => a.id === accountId)) return `That token's user is not a member of Chatwoot account ${accountId}`;
     const inboxes = await client.listInboxes(accountId, token);
-    if (!inboxes.find((i) => i.inbox_identifier === inboxIdentifier)) return `No API inbox with identifier "${inboxIdentifier}" in account ${accountId}`;
-    return null;
+    const inbox = inboxes.find((i) => i.inbox_identifier === inboxIdentifier);
+    if (!inbox) return `No API inbox with identifier "${inboxIdentifier}" in account ${accountId}`;
+    return { inboxId: inbox.id };
   } catch (err) {
     if (err instanceof ChatwootHttpError && err.status === 401) return "Chatwoot rejected that token";
     return `Could not verify with Chatwoot: ${err instanceof Error ? err.message : String(err)}`;

@@ -28,6 +28,9 @@ describe("Slack -> Chatwoot", () => {
       avatarUrl: "https://avatars.test/U_ALICE.png",
     });
     expect(bridge.chatwootMock.createConversation).toHaveBeenCalledWith("src-U_ALICE");
+    // Welcome message from the bot in the new thread.
+    expect(bridge.slackMock.chat.postMessage).toHaveBeenCalledTimes(1);
+    expect(bridge.slackMock.chat.postMessage.mock.calls[0]![0]).toMatchObject({ channel: "C_HELP", thread_ts: "1700000000.000100", text: expect.stringContaining("helper will be with you soon") });
     // Contact refreshed after creation so the Slack avatar/name win over Gravatar or stale data.
     expect(bridge.chatwootMock.updateContact).toHaveBeenCalledWith(1, { name: "Name U_ALICE", avatarUrl: "https://avatars.test/U_ALICE.png" });
     expect(bridge.chatwootMock.createContactMessage).toHaveBeenCalledWith("src-U_ALICE", 42, "help me @Name U_BOB & co", [], "1700000000.000100");

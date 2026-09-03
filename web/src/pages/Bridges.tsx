@@ -13,6 +13,9 @@ interface Draft {
   chatwootApiToken: string;
   reactionResolve: string;
   reactionAssign: string;
+  welcomeMessage: string;
+  resolveMessage: string;
+  reopenMessage: string;
   enabled: boolean;
 }
 
@@ -27,6 +30,9 @@ const EMPTY: Draft = {
   chatwootApiToken: "",
   reactionResolve: "white_check_mark",
   reactionAssign: "eyes",
+  welcomeMessage: "",
+  resolveMessage: "",
+  reopenMessage: "",
   enabled: true,
 };
 
@@ -47,11 +53,14 @@ function fromBridge(b: Bridge): Draft {
     chatwootInboxIdentifier: b.chatwootInboxIdentifier,
     reactionResolve: b.reactionResolve ?? "",
     reactionAssign: b.reactionAssign ?? "",
+    welcomeMessage: b.welcomeMessage ?? "",
+    resolveMessage: b.resolveMessage ?? "",
+    reopenMessage: b.reopenMessage ?? "",
     enabled: b.enabled,
   };
 }
 
-export function Bridges(_: { me: Me }) {
+export function Bridges({ me }: { me: Me }) {
   const { data, error, reload } = useResource<Bridge[]>("/bridges");
   const [editing, setEditing] = useState<Bridge | "new" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -128,6 +137,7 @@ export function Bridges(_: { me: Me }) {
       </div>
       {editing && (
         <BridgeForm
+          me={me}
           bridge={editing === "new" ? null : editing}
           onDone={(warning) => {
             setEditing(null);
@@ -141,8 +151,8 @@ export function Bridges(_: { me: Me }) {
   );
 }
 
-function BridgeForm({ bridge, onDone, onCancel }: { bridge: Bridge | null; onDone: (warning?: string) => void; onCancel: () => void }) {
-  const [d, setD] = useState<Draft>(bridge ? fromBridge(bridge) : EMPTY);
+function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge | null; onDone: (warning?: string) => void; onCancel: () => void }) {
+  const [d, setD] = useState<Draft>(bridge ? fromBridge(bridge) : { ...EMPTY, ...me.defaults });
   const [slugTouched, setSlugTouched] = useState(Boolean(bridge));
   const [cw, setCw] = useState<Introspection | null>(null);
   const [cwErr, setCwErr] = useState<string | null>(null);
@@ -211,6 +221,9 @@ function BridgeForm({ bridge, onDone, onCancel }: { bridge: Bridge | null; onDon
       ...(d.chatwootApiToken ? { chatwootApiToken: d.chatwootApiToken } : {}),
       reactionResolve: d.reactionResolve,
       reactionAssign: d.reactionAssign,
+      welcomeMessage: d.welcomeMessage,
+      resolveMessage: d.resolveMessage,
+      reopenMessage: d.reopenMessage,
       enabled: d.enabled,
     };
     try {
@@ -363,6 +376,21 @@ function BridgeForm({ bridge, onDone, onCancel }: { bridge: Bridge | null; onDon
             <input type="checkbox" style={{ width: "auto", marginRight: 6 }} checked={d.enabled} onChange={(e) => setD((x) => ({ ...x, enabled: e.target.checked }))} />
             Enabled
           </label>
+        </div>
+      </div>
+      <p className="note">Messages the bot posts in the Slack thread. Slack formatting and :emoji: names work. Blank disables a message.</p>
+      <div className="form-grid">
+        <div className="field" style={{ gridColumn: "1 / -1" }}>
+          <label>Welcome message (new thread)</label>
+          <textarea rows={2} value={d.welcomeMessage} onChange={set("welcomeMessage")} />
+        </div>
+        <div className="field">
+          <label>Resolved message (requires the conversation_status_changed webhook event)</label>
+          <textarea rows={2} value={d.resolveMessage} onChange={set("resolveMessage")} />
+        </div>
+        <div className="field">
+          <label>Reopened message (replaces the resolved message)</label>
+          <textarea rows={2} value={d.reopenMessage} onChange={set("reopenMessage")} />
         </div>
       </div>
 

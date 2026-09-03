@@ -51,13 +51,14 @@ export interface PostArgs {
 class ChannelThrottle {
   private lastPost = new Map<string, number>();
   private chains = new Map<string, Promise<unknown>>();
+  intervalMs = 1000;
 
   run<T>(channel: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.chains.get(channel) ?? Promise.resolve();
     const next = prev
       .catch(() => undefined)
       .then(async () => {
-        const wait = (this.lastPost.get(channel) ?? 0) + 1000 - Date.now();
+        const wait = (this.lastPost.get(channel) ?? 0) + this.intervalMs - Date.now();
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
         try {
           return await fn();
@@ -71,6 +72,11 @@ class ChannelThrottle {
 }
 
 const throttle = new ChannelThrottle();
+
+/** Tests set this to 0; production keeps Slack's ~1 msg/sec/channel floor. */
+export function setPostIntervalMs(ms: number): void {
+  throttle.intervalMs = ms;
+}
 
 /** Factory is overridable so tests can observe which token a client was built with. */
 export let createUserClient = (token: string): WebClient => new WebClient(token, { retryConfig: { retries: 2 } });
@@ -205,4 +211,30 @@ function isAuthError(err: unknown): boolean {
   const e = err as { code?: string; data?: { error?: string } };
   if (e?.code !== ErrorCode.PlatformError) return false;
   return ["invalid_auth", "token_revoked", "token_expired", "account_inactive", "not_authed"].includes(e.data?.error ?? "");
+}
+
+/** A message from the bridge bot itself (welcome / status notices). Returns ts. */
+export async function postSystemMessage(bridge: Bridge, channel: string, threadTs: string, text: string): Promise<string> {
+  return throttle.run(channel, async () => {
+    const res = await bridge.slack.chat.postMessage({
+      channel,
+      thread_ts: threadTs,
+      text,
+      unfurl_links: false,
+      unfurl_media: false,
+      metadata: { event_type: BRIDGE_METADATA_EVENT, event_payload: { system: true } },
+    });
+    return tsOf(res);
+  });
+}
+
+/** Delete one of our own messages; a missing message is not an error. */
+export async function deleteSystemMessage(bridge: Bridge, channel: string, ts: string): Promise<void> {
+  try {
+    await bridge.slack.chat.delete({ channel, ts });
+  } catch (err) {
+    const e = err as { data?: { error?: string } };
+    if (e?.data?.error === "message_not_found" || e?.data?.error === "cant_delete_message") return;
+    throw err;
+  }
 }

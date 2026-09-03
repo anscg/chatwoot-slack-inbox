@@ -8,7 +8,7 @@ import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
 import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, recordRelayed } from "../store.js";
 import { downloadSlackFiles, type SlackFileRef } from "./files.js";
-import { BRIDGE_METADATA_EVENT } from "./post.js";
+import { BRIDGE_METADATA_EVENT, postSystemMessage } from "./post.js";
 import { slackToChatwootText } from "./text.js";
 import { getSlackProfile } from "./users.js";
 
@@ -183,6 +183,11 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, g
         await chatwoot.updateContact(contact.id, { name: author.name, avatarUrl: author.avatarUrl }).catch((err) => {
           log.warn("could not refresh contact avatar", { contactId: contact.id, error: err instanceof Error ? err.message : String(err) });
         });
+        if (bridge.row.welcomeMessage) {
+          await postSystemMessage(bridge, job.channel, job.ts, bridge.row.welcomeMessage).catch((err) => {
+            log.warn("could not post welcome message", { channel: job.channel, ts: job.ts, error: err instanceof Error ? err.message : String(err) });
+          });
+        }
       }
       const message = await chatwoot.createContactMessage(thread.chatwootContactSourceId, thread.chatwootConversationId, text, attachments, job.ts);
       await recordRelayed(db, { slackChannel: job.channel, slackTs: job.ts, chatwootMessageId: message.id, direction: "slack_to_chatwoot" });
@@ -267,6 +272,6 @@ export function registerSlackEvents(app: App, ctx: AppContext): void {
   app.event("reaction_added", async ({ event, body }) => {
     const eventId = (body as { event_id?: string }).event_id ?? `${event.event_ts}`;
     const reason = await acceptSlackReaction(ctx, eventId, event as unknown as IncomingSlackReaction);
-    if (reason) log.debug("skipping slack reaction", { reason, eventId });
+    if (reason) log.info("ignoring slack reaction", { reason, user: (event as { user?: string }).user, reaction: (event as { reaction?: string }).reaction, eventId });
   });
 }

@@ -20,11 +20,17 @@ export const bridges = pgTable(
     slackTeamId: text("slack_team_id"),
     chatwootAccountId: integer("chatwoot_account_id").notNull(),
     chatwootInboxIdentifier: text("chatwoot_inbox_identifier").notNull(),
+    /** Numeric inbox id; conversation webhooks carry inbox_id but not account_id. Backfilled if missing. */
+    chatwootInboxId: integer("chatwoot_inbox_id"),
     /** Service-agent access token for this account, used when no per-agent token applies. */
     chatwootApiTokenEnc: text("chatwoot_api_token_enc").notNull(),
     /** Emoji short names; null disables the reaction. */
     reactionResolve: text("reaction_resolve"),
     reactionAssign: text("reaction_assign"),
+    /** Bot messages posted in the Slack thread; null disables each. */
+    welcomeMessage: text("welcome_message"),
+    resolveMessage: text("resolve_message"),
+    reopenMessage: text("reopen_message"),
     enabled: boolean("enabled").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -44,6 +50,9 @@ export const threads = pgTable(
     chatwootConversationId: integer("chatwoot_conversation_id").notNull(),
     chatwootContactSourceId: text("chatwoot_contact_source_id").notNull(),
     slackAuthorId: text("slack_author_id").notNull(),
+    /** Last Chatwoot status we saw, and the ts of the status message currently posted in the thread. */
+    lastStatus: text("last_status"),
+    statusMessageTs: text("status_message_ts"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

@@ -61,7 +61,7 @@ export function mockChatwoot(): MockChatwoot {
 
 export interface MockSlack {
   users: { info: ReturnType<typeof vi.fn> };
-  chat: { postMessage: ReturnType<typeof vi.fn> };
+  chat: { postMessage: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
   files: { uploadV2: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
 }
 
@@ -81,7 +81,7 @@ export function mockSlack(): MockSlack {
         },
       })),
     },
-    chat: { postMessage: vi.fn(async () => ({ ok: true, ts: `${Date.now() / 1000}` })) },
+    chat: { postMessage: vi.fn(async () => ({ ok: true, ts: `${Date.now() / 1000}` })), delete: vi.fn(async () => ({ ok: true })) },
   };
 }
 
@@ -97,6 +97,7 @@ export interface BridgeOverrides {
   accountId?: number;
   reactionResolve?: string | null;
   reactionAssign?: string | null;
+  welcomeMessage?: string | null;
 }
 
 /**
@@ -136,6 +137,10 @@ export async function addBridge(ctx: TestContext, over: BridgeOverrides, chatwoo
     slackSigningSecretEnc: encryptToken("signing-secret", TEST_KEY),
     chatwootAccountId: over.accountId ?? 1,
     chatwootInboxIdentifier: `inbox-${over.accountId ?? 1}`,
+    chatwootInboxId: 10 + (over.accountId ?? 1),
+    welcomeMessage: over.welcomeMessage === undefined ? "Hi there :neocat_approve: a helper will be with you soon." : over.welcomeMessage,
+    resolveMessage: ":neocat: Help request marked as resolved.",
+    reopenMessage: "Thread reopened.",
     chatwootApiTokenEnc: encryptToken("service-token", TEST_KEY),
     reactionResolve: over.reactionResolve === undefined ? "white_check_mark" : over.reactionResolve,
     reactionAssign: over.reactionAssign === undefined ? "eyes" : over.reactionAssign,

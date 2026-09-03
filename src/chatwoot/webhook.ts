@@ -3,9 +3,9 @@ import type { Request, Response, Router } from "express";
 import type { AppContext } from "../context.js";
 import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
-import { postToSlackThread, resolvePostIdentity, SlackUploadUnavailable, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
+import { deleteSystemMessage, postSystemMessage, postToSlackThread, resolvePostIdentity, SlackUploadUnavailable, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
 import { chatwootToSlackText } from "../slack/text.js";
-import { findThreadByConversation, isRelayedChatwoot, recordRelayed, recordRelayedFiles } from "../store.js";
+import { findThreadByConversation, isRelayedChatwoot, recordRelayed, recordRelayedFiles, setThreadStatus } from "../store.js";
 
 const MAX_ATTACHMENT_BYTES = 40 * 1024 * 1024;
 
@@ -36,6 +36,7 @@ function filenameFor(url: string, contentType: string | null, type: string): str
 }
 
 export const JOB_CHATWOOT_MESSAGE = "chatwoot_message";
+export const JOB_CHATWOOT_STATUS = "chatwoot_status";
 
 /**
  * Chatwoot fires the webhook for messages the bridge itself created via the API a
@@ -46,6 +47,10 @@ export const ECHO_GRACE_MS = 1500;
 export interface ChatwootWebhookPayload {
   event?: string;
   id?: number;
+  /** conversation_* events: the conversation itself is the payload. */
+  status?: string;
+  inbox_id?: number;
+  messages?: { account_id?: number }[];
   content?: string | null;
   message_type?: "incoming" | "outgoing" | "activity" | "template" | number;
   private?: boolean;
@@ -68,8 +73,22 @@ export interface ChatwootMessageJob extends Record<string, unknown> {
   attachments: { url: string; type: string }[];
 }
 
+export interface ChatwootStatusJob extends Record<string, unknown> {
+  conversationId: number;
+  status: string;
+  /** Known when the payload carries it; otherwise resolved from inboxId at run time. */
+  accountId?: number;
+  inboxId?: number;
+}
+
 /** Validate + shape a webhook body into a job. Returns a skip reason or the job. No I/O. */
-export function classifyWebhook(body: ChatwootWebhookPayload): { skip: string } | { job: ChatwootMessageJob } {
+export function classifyWebhook(body: ChatwootWebhookPayload): { skip: string } | { job: ChatwootMessageJob } | { statusJob: ChatwootStatusJob } {
+  if (body.event === "conversation_status_changed") {
+    if (!body.id || !body.status) return { skip: "missing ids" };
+    const accountId = body.account?.id ?? body.messages?.find((m) => m.account_id)?.account_id;
+    const inboxId = body.inbox_id ?? body.conversation?.inbox_id;
+    return { statusJob: { conversationId: body.id, status: body.status, ...(accountId ? { accountId } : {}), ...(inboxId ? { inboxId } : {}) } };
+  }
   if (body.event !== "message_created") return { skip: `event ${body.event}` };
   if (body.message_type !== "outgoing" && body.message_type !== 1) return { skip: `message_type ${body.message_type}` };
   if (body.private) return { skip: "private note" };
@@ -163,6 +182,39 @@ export async function relayChatwootMessage(ctx: AppContext, job: ChatwootMessage
   }
 }
 
+/**
+ * Post/replace the bot's status notice in the Slack thread when Chatwoot resolves or reopens.
+ * Only the latest notice is kept: reopening deletes the "resolved" notice and vice versa.
+ */
+export async function applyChatwootStatus(ctx: AppContext, job: ChatwootStatusJob): Promise<void> {
+  let accountId = job.accountId;
+  if (!accountId && job.inboxId) accountId = ctx.bridges.all().find((b) => b.row.chatwootInboxId === job.inboxId)?.row.chatwootAccountId;
+  if (!accountId) {
+    log.warn("status change without resolvable account; is chatwoot_inbox_id set on the bridge?", { conversationId: job.conversationId, inboxId: job.inboxId });
+    return;
+  }
+  const thread = await findThreadByConversation(ctx.db, accountId, job.conversationId);
+  if (!thread) return;
+  const bridge = ctx.bridges.forChannel(thread.slackChannel);
+  if (!bridge) throw new PermanentError(`no enabled bridge for channel ${thread.slackChannel}`);
+  if (thread.lastStatus === job.status) return; // duplicate delivery
+
+  let text: string | null = null;
+  if (job.status === "resolved") text = bridge.row.resolveMessage;
+  else if (job.status === "open" && thread.lastStatus === "resolved") text = bridge.row.reopenMessage;
+
+  let statusMessageTs = thread.statusMessageTs;
+  if (text !== null || job.status === "resolved" || job.status === "open") {
+    if (statusMessageTs && (text || job.status === "open")) {
+      await deleteSystemMessage(bridge, thread.slackChannel, statusMessageTs);
+      statusMessageTs = null;
+    }
+    if (text) statusMessageTs = await postSystemMessage(bridge, thread.slackChannel, thread.slackThreadTs, text);
+  }
+  await setThreadStatus(ctx.db, thread.id, { lastStatus: job.status, statusMessageTs });
+  log.info("conversation status changed", { bridge: bridge.row.name, conversationId: job.conversationId, status: job.status, notice: Boolean(text) });
+}
+
 function secretMatches(given: string, expected: string): boolean {
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
@@ -171,6 +223,7 @@ function secretMatches(given: string, expected: string): boolean {
 
 export function registerChatwootWebhook(router: Router, ctx: AppContext): void {
   ctx.retry.register(JOB_CHATWOOT_MESSAGE, (payload) => relayChatwootMessage(ctx, payload as ChatwootMessageJob));
+  ctx.retry.register(JOB_CHATWOOT_STATUS, (payload) => applyChatwootStatus(ctx, payload as ChatwootStatusJob));
 
   router.post("/webhooks/chatwoot/:secret", (req: Request, res: Response) => {
     const secret = String(req.params.secret ?? "");
@@ -182,6 +235,10 @@ export function registerChatwootWebhook(router: Router, ctx: AppContext): void {
     res.status(200).json({ ok: true }); // ack first
     if ("skip" in result) {
       log.debug("skipping chatwoot webhook", { reason: result.skip });
+      return;
+    }
+    if ("statusJob" in result) {
+      void ctx.retry.runOrEnqueue(JOB_CHATWOOT_STATUS, result.statusJob);
       return;
     }
     void ctx.retry.runOrEnqueue(JOB_CHATWOOT_MESSAGE, result.job);
