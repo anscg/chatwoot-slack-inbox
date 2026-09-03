@@ -7,15 +7,16 @@ import { decryptToken } from "../crypto.js";
 import type { Agent, Thread } from "../db/schema.js";
 import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
-import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, recordRelayed, setWelcomeMessageTs } from "../store.js";
+import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, markThreadDeleted, recordRelayed, setWelcomeMessageTs } from "../store.js";
 import { downloadSlackFiles, type SlackFileRef } from "./files.js";
 import { buttonForStatus, parseButtonValue, RESOLVE_ACTION_ID, messageBlocks, type ButtonAction } from "./blocks.js";
 import { BRIDGE_METADATA_EVENT, postEphemeralInThread, postSystemMessage } from "./post.js";
 import { slackToChatwootText } from "./text.js";
-import { getSlackProfile } from "./users.js";
+import { getSlackProfile, messageStillExists } from "./users.js";
 
 export const JOB_SLACK_MESSAGE = "slack_message";
 export const JOB_SLACK_REACTION = "slack_reaction";
+export const JOB_THREAD_DELETED = "slack_thread_deleted";
 
 /** The subset of a Slack message event we persist into the retry payload. */
 export interface SlackMessageJob extends Record<string, unknown> {
@@ -60,6 +61,13 @@ export interface IncomingSlackMessage {
   text?: string;
   files?: SlackFileRef[];
   metadata?: { event_type?: string };
+  /** message_deleted: the ts of the message that was removed. */
+  deleted_ts?: string;
+}
+
+export interface ThreadDeletedJob extends Record<string, unknown> {
+  channel: string;
+  ts: string;
 }
 
 export interface IncomingSlackReaction {
@@ -78,6 +86,18 @@ const RELAYABLE_SUBTYPES = new Set<string | undefined>([undefined, "file_share",
 export async function acceptSlackMessage(ctx: AppContext, eventId: string, msg: IncomingSlackMessage): Promise<string | null> {
   const bridge = ctx.bridges.forChannel(msg.channel);
   if (!bridge) return "unbridged channel";
+  // Someone deleted their question. Slack would happily accept further "replies" to it and show
+  // them as ordinary channel posts, so stop bridging this thread entirely.
+  if (msg.subtype === "message_deleted") {
+    const deletedTs = msg.deleted_ts;
+    if (!deletedTs) return "message_deleted without deleted_ts";
+    const gone = await findThreadBySlack(ctx.db, msg.channel, deletedTs);
+    if (!gone) return "deleted message did not start a bridged thread";
+    if (gone.deletedAt) return "thread already marked deleted";
+    await markThreadDeleted(ctx.db, gone.id);
+    void ctx.retry.runOrEnqueue(JOB_THREAD_DELETED, { channel: msg.channel, ts: deletedTs } satisfies ThreadDeletedJob);
+    return "thread parent deleted; bridging stopped";
+  }
   if (!RELAYABLE_SUBTYPES.has(msg.subtype)) return `subtype ${msg.subtype}`;
   if (msg.bot_id && msg.bot_id === bridge.botId) return "own bot message";
   if (msg.user && msg.user === bridge.botUserId) return "own bot user";
@@ -184,6 +204,20 @@ function permanentIf4xx(err: unknown): never {
  */
 export const SLACK_ECHO_GRACE_MS = 1500;
 
+/** Tell the Chatwoot agents, privately, that the Slack thread is gone. */
+export async function noteThreadDeleted(ctx: AppContext, job: ThreadDeletedJob): Promise<void> {
+  const bridge = ctx.bridges.forChannel(job.channel);
+  if (!bridge) throw new PermanentError(`no bridge for channel ${job.channel}`);
+  const thread = await findThreadBySlack(ctx.db, job.channel, job.ts);
+  if (!thread) return;
+  await bridge.chatwoot.createAgentMessage(
+    thread.chatwootConversationId,
+    "_The Slack message that started this conversation was deleted. Nothing further will be relayed to Slack._",
+    { private: true },
+  );
+  log.info("thread parent deleted", { bridge: bridge.row.name, conversationId: thread.chatwootConversationId, channel: job.channel, ts: job.ts });
+}
+
 /** Relay one Slack message into Chatwoot. Idempotent: safe to run again from the retry queue. */
 export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, graceMs = SLACK_ECHO_GRACE_MS): Promise<void> {
   const { db, hub } = ctx;
@@ -210,6 +244,7 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, g
     if (!isReply) {
       // Top-level message: contact -> conversation -> message.
       let thread = await findThreadBySlack(db, job.channel, job.ts);
+      if (thread?.deletedAt) return; // question was deleted before we got here
       if (!thread) {
         const contact = await chatwoot.upsertContact({
           identifier: job.user,
@@ -232,7 +267,14 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, g
         await chatwoot.updateContact(contact.id, { name: author.name, avatarUrl: author.avatarUrl }).catch((err) => {
           log.warn("could not refresh contact avatar", { contactId: contact.id, error: err instanceof Error ? err.message : String(err) });
         });
-        if (bridge.row.welcomeMessage) {
+        // The question may have been deleted while we were talking to Chatwoot, in which case the
+        // deletion event may have arrived before this thread row existed. Check both.
+        const gone = Boolean((await findThreadBySlack(db, job.channel, job.ts))?.deletedAt) || !(await messageStillExists(bridge.slack, job.channel, job.ts));
+        if (gone) {
+          await markThreadDeleted(db, thread.id);
+          void ctx.retry.runOrEnqueue(JOB_THREAD_DELETED, { channel: job.channel, ts: job.ts } satisfies ThreadDeletedJob);
+          log.info("question was deleted before the thread got going", { channel: job.channel, ts: job.ts });
+        } else if (bridge.row.welcomeMessage) {
           const blocks = messageBlocks(bridge.row.welcomeMessage, job.ts, buttonForStatus("open", bridge.row));
           const welcomeTs = await postSystemMessage(bridge, job.channel, job.ts, bridge.row.welcomeMessage, blocks).catch((err) => {
             log.warn("could not post welcome message", { channel: job.channel, ts: job.ts, error: err instanceof Error ? err.message : String(err) });
@@ -252,6 +294,7 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, g
       log.info("reply in unmapped thread, ignoring", { channel: job.channel, thread_ts: job.thread_ts });
       return;
     }
+    if (thread.deletedAt) return;
 
     const agent = await findAgentBySlackUser(db, job.user);
     let messageId: number;
@@ -329,6 +372,7 @@ async function contactSideStatus(bridge: Bridge, thread: Thread): Promise<string
 export function registerSlackJobs(ctx: AppContext): void {
   ctx.retry.register(JOB_SLACK_MESSAGE, (payload) => relaySlackMessage(ctx, payload as SlackMessageJob));
   ctx.retry.register(JOB_SLACK_REACTION, (payload) => applySlackReaction(ctx, payload as SlackReactionJob));
+  ctx.retry.register(JOB_THREAD_DELETED, (payload) => noteThreadDeleted(ctx, payload as ThreadDeletedJob));
 }
 
 /** Attach listeners to one bridge's Bolt app. Events are still validated against the channel mapping. */

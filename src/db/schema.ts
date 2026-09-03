@@ -60,6 +60,8 @@ export const threads = pgTable(
     statusMessageTs: text("status_message_ts"),
     /** ts of the bot's welcome message, so its button can be re-labelled when the status changes. */
     welcomeMessageTs: text("welcome_message_ts"),
+    /** Set when the Slack message that started the thread is deleted; nothing is relayed after that. */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

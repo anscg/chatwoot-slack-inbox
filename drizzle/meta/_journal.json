@@ -43,6 +43,13 @@
       "when": 1788441038424,
       "tag": "0005_resolved_emoji",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788442671116,
+      "tag": "0006_thread_deleted",
+      "breakpoints": true
     }
   ]
 }

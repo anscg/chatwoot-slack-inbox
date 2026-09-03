@@ -4,9 +4,9 @@ import type { AppContext } from "../context.js";
 import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
 import { buttonForStatus, messageBlocks } from "../slack/blocks.js";
-import { deleteSystemMessage, postSystemMessage, postToSlackThread, resolvePostIdentity, setBotReaction, SlackUploadUnavailable, updateSystemMessage, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
+import { deleteSystemMessage, postSystemMessage, postToSlackThread, resolvePostIdentity, setBotReaction, SlackUploadUnavailable, ThreadGone, updateSystemMessage, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
 import { chatwootToSlackText } from "../slack/text.js";
-import { findThreadByConversation, isRelayedChatwoot, recordRelayed, recordRelayedFiles, setThreadStatus } from "../store.js";
+import { findThreadByConversation, isRelayedChatwoot, markThreadDeleted, recordRelayed, recordRelayedFiles, setThreadStatus } from "../store.js";
 
 const MAX_ATTACHMENT_BYTES = 40 * 1024 * 1024;
 
@@ -118,6 +118,10 @@ export async function relayChatwootMessage(ctx: AppContext, job: ChatwootMessage
     log.debug("chatwoot message for unmapped conversation", { accountId: job.accountId, conversationId: job.conversationId });
     return;
   }
+  if (thread.deletedAt) {
+    log.debug("skipping relay: the slack thread was deleted", { conversationId: job.conversationId });
+    return;
+  }
   const bridge = ctx.bridges.forChannel(thread.slackChannel);
   if (!bridge) throw new PermanentError(`no enabled bridge for channel ${thread.slackChannel}`);
 
@@ -158,13 +162,21 @@ export async function relayChatwootMessage(ctx: AppContext, job: ChatwootMessage
     text = text.trim() ? `${text}\n${links}` : links;
   }
   if (text.trim()) {
-    ts = await postToSlackThread(ctx, bridge, {
-      channel: thread.slackChannel,
-      threadTs: thread.slackThreadTs,
-      text,
-      identity,
-      chatwootMessageId: job.messageId,
-    });
+    try {
+      ts = await postToSlackThread(ctx, bridge, {
+        channel: thread.slackChannel,
+        threadTs: thread.slackThreadTs,
+        text,
+        identity,
+        chatwootMessageId: job.messageId,
+      });
+    } catch (err) {
+      if (!(err instanceof ThreadGone)) throw err;
+      // The question was deleted without us seeing the event; stop trying.
+      await markThreadDeleted(ctx.db, thread.id);
+      log.warn("slack thread is gone; marking it deleted", { conversationId: job.conversationId, channel: thread.slackChannel });
+      return;
+    }
   }
   if (!ts) return; // nothing to send (shouldn't happen: classifyWebhook drops empty messages)
   await recordRelayed(ctx.db, { slackChannel: thread.slackChannel, slackTs: ts, chatwootMessageId: job.messageId, direction: "chatwoot_to_slack" });
@@ -198,7 +210,7 @@ export async function applyChatwootStatus(ctx: AppContext, job: ChatwootStatusJo
     return;
   }
   const thread = await findThreadByConversation(ctx.db, accountId, job.conversationId);
-  if (!thread) return;
+  if (!thread || thread.deletedAt) return;
   const bridge = ctx.bridges.forChannel(thread.slackChannel);
   if (!bridge) throw new PermanentError(`no enabled bridge for channel ${thread.slackChannel}`);
   if (thread.lastStatus === job.status) return; // duplicate delivery

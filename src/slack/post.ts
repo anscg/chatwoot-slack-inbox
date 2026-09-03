@@ -103,21 +103,20 @@ export async function postToSlackThread(ctx: AppContext, bridge: Bridge, args: P
     if (args.identity.kind === "user") {
       const id = args.identity;
       try {
-        const res = await createUserClient(id.token).chat.postMessage(base);
-        return tsOf(res);
+        return await postThreaded(createUserClient(id.token), base);
       } catch (err) {
+        if (err instanceof ThreadGone) throw err;
         if (!isAuthError(err)) throw err;
         log.warn("slack user token rejected; unlinking and posting as bot", { slackUserId: id.slackUserId, error: (err as Error).message });
         await ctx.db.update(agents).set({ slackUserTokenEnc: null }).where(eq(agents.slackUserId, id.slackUserId));
       }
     }
     const bot: { username?: string; iconUrl?: string } = args.identity.kind === "bot" ? args.identity : {};
-    const res = await bridge.slack.chat.postMessage({
+    return postThreaded(bridge.slack, {
       ...base,
       ...(bot.username ? { username: bot.username } : {}),
       ...(bot.iconUrl ? { icon_url: bot.iconUrl } : {}),
     });
-    return tsOf(res);
   });
 }
 
@@ -201,6 +200,30 @@ function isScopeError(err: unknown): boolean {
   return e?.code === ErrorCode.PlatformError && ["missing_scope", "not_allowed_token_type", "no_permission"].includes(e.data?.error ?? "");
 }
 
+/** The thread this message belongs to is gone from Slack, so nothing more can be posted into it. */
+export class ThreadGone extends Error {}
+
+/**
+ * Post into a thread, refusing to leak into the channel.
+ *
+ * When `thread_ts` points at a message that no longer exists (someone deleted their question,
+ * possibly seconds after asking), Slack does not fail: it posts the message to the channel as a
+ * normal top-level post. Detect that from the response and take the stray message back out.
+ */
+async function postThreaded(client: WebClient, args: Record<string, unknown> & { channel: string; thread_ts: string }): Promise<string> {
+  const res = await client.chat.postMessage(args as never);
+  const ts = tsOf(res);
+  const posted = (res as { message?: { thread_ts?: string } }).message;
+  if (posted && !posted.thread_ts) {
+    log.warn("slack put our reply in the channel because the thread parent is gone; removing it", { channel: args.channel, threadTs: args.thread_ts });
+    await client.chat.delete({ channel: args.channel, ts }).catch((err) =>
+      log.error("could not remove the stray channel message", { channel: args.channel, ts, error: err instanceof Error ? err.message : String(err) }),
+    );
+    throw new ThreadGone(`thread parent ${args.thread_ts} no longer exists in ${args.channel}`);
+  }
+  return ts;
+}
+
 function tsOf(res: WebAPICallResult): string {
   const ts = (res as { ts?: string }).ts;
   if (!ts) throw new Error("chat.postMessage returned no ts");
@@ -215,8 +238,8 @@ function isAuthError(err: unknown): boolean {
 
 /** A message from the bridge bot itself (welcome / status notices). Returns ts. */
 export async function postSystemMessage(bridge: Bridge, channel: string, threadTs: string, text: string, blocks?: KnownBlock[]): Promise<string> {
-  return throttle.run(channel, async () => {
-    const res = await bridge.slack.chat.postMessage({
+  return throttle.run(channel, () =>
+    postThreaded(bridge.slack, {
       channel,
       thread_ts: threadTs,
       text,
@@ -224,9 +247,8 @@ export async function postSystemMessage(bridge: Bridge, channel: string, threadT
       unfurl_links: false,
       unfurl_media: false,
       metadata: { event_type: BRIDGE_METADATA_EVENT, event_payload: { system: true } },
-    });
-    return tsOf(res);
-  });
+    }),
+  );
 }
 
 /**

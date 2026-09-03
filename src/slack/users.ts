@@ -27,6 +27,20 @@ export async function getSlackProfile(slack: WebClient, userId: string): Promise
   return profile;
 }
 
+/**
+ * Does this message still exist? Called before posting a welcome into a brand new thread, because a
+ * question deleted seconds after being asked would otherwise get a reply posted to the channel.
+ * Errors count as "still there": the postThreaded guard is the backstop.
+ */
+export async function messageStillExists(slack: WebClient, channel: string, ts: string): Promise<boolean> {
+  try {
+    const res = await slack.conversations.history({ channel, latest: ts, oldest: ts, inclusive: true, limit: 1 });
+    return (res.messages ?? []).some((m) => (m as { ts?: string }).ts === ts);
+  } catch {
+    return true;
+  }
+}
+
 export function clearProfileCache(): void {
   cache.clear();
 }

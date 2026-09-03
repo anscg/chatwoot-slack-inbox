@@ -69,11 +69,13 @@ export interface MockSlack {
   };
   files: { uploadV2: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
   reactions: { add: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> };
+  conversations: { history: ReturnType<typeof vi.fn> };
 }
 
 export function mockSlack(): MockSlack {
   return {
     reactions: { add: vi.fn(async () => ({ ok: true })), remove: vi.fn(async () => ({ ok: true })) },
+    conversations: { history: vi.fn(async ({ latest }: { latest: string }) => ({ ok: true, messages: [{ ts: latest }] })) },
     files: {
       uploadV2: vi.fn(async () => ({ ok: true, files: [{ files: [{ id: "F_BOT1" }] }] })),
       info: vi.fn(async () => ({ ok: true, file: { shares: { public: { C_HELP: [{ ts: "1700000000.000700" }] } } } })),
