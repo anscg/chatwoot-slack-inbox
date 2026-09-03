@@ -7,6 +7,7 @@ import { ChatwootPlatformClient } from "./chatwoot/platform.js";
 import { registerChatwootWebhook } from "./chatwoot/webhook.js";
 import { loadConfig } from "./config.js";
 import type { AppContext } from "./context.js";
+import { registerDashboardRoutes } from "./dashboard.js";
 import { createDb, runMigrations } from "./db/client.js";
 import { log, setLogLevel } from "./logger.js";
 import { RetryQueue } from "./retry.js";
@@ -78,6 +79,7 @@ async function main(): Promise<void> {
   registerChatwootWebhook(app, ctx);
   registerSlackOAuth(app, ctx);
   registerSetupRoutes(app, config);
+  registerDashboardRoutes(app, ctx);
   registerAdminApi(app, ctx);
 
   // Control panel SPA (built by `npm run build` into web/dist).

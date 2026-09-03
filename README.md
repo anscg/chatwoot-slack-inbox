@@ -92,6 +92,43 @@ Chatwoot Cloud has no super admin console, so there it stays manual: an admin at
 - Contacts carry the Slack display name and avatar; both are refreshed on every new thread. Chatwoot also looks up Gravatar for contacts with an email, so on a self-hosted Chatwoot set `DISABLE_GRAVATAR=true` if you want Slack avatars to be the only source.
 - Tokens (Slack user tokens, Chatwoot access tokens) are AES-256-GCM encrypted with `TOKEN_ENCRYPTION_KEY`.
 
+## Slack emoji in the Chatwoot dashboard
+
+Chatwoot only knows Unicode emoji, so a workspace's custom ones (`:parrot:`, `:yay:`) don't exist for agents — but Slack expands the shortcode when the bridge relays the reply. This service ships a dashboard script that puts them in front of agents in both places they reach for emoji:
+
+- a **Slack** section pinned between the emoji picker's search box and its Unicode grid, filtered by that same search box
+- the **`:` typeahead**: Chatwoot 4.x has its own `:` picker for Unicode emoji, and the script adds the Slack matches as a section above Chatwoot's list. Click one, or press ArrowUp from the top of Chatwoot's list to step into the Slack rows and hit Enter.
+
+Both insert the plain `:name:` shortcode, which arrives in Slack as the real emoji.
+
+Set up (self-hosted Chatwoot; needs sysadmin access to the Chatwoot environment):
+
+1. Reinstall the hub Slack app so it has the `emoji:read` scope — its manifest at `${PUBLIC_URL}/setup` now includes it. Existing installs must be reinstalled or the endpoint returns a 503 saying so.
+2. Add to Chatwoot's environment and restart:
+   ```
+   DASHBOARD_SCRIPTS=<script src="https://bridge.example.com/dashboard/slack-emoji.js"></script>
+   ```
+   Chatwoot injects that markup into the agent dashboard. Chatwoot Cloud has no such knob, so this is self-hosted only.
+
+   The bridge serves the script itself, but it can equally come from a CDN — in that case name the bridge, or it won't know where to fetch the emoji list from:
+   ```
+   DASHBOARD_SCRIPTS=<script src="https://cdn.jsdelivr.net/gh/anscg/chatwoot-slack-inbox@<commit>/public/slack-emoji.js" data-bridge="https://bridge.example.com"></script>
+   ```
+   Pin a commit rather than a branch: jsDelivr caches a branch URL for hours, so a pinned SHA is both faster to purge and safer to reason about.
+
+The script reads `${PUBLIC_URL}/dashboard/slack-emoji.json`, which the bridge fills from a single `emoji.list` call on the hub app (that method is not paginated — one request returns the whole workspace). The endpoint is unauthenticated but `Access-Control-Allow-Origin` is limited to `CHATWOOT_BASE_URL` and `PUBLIC_URL`, and it exposes nothing but emoji names and their already-public `slack-edge.com` image URLs.
+
+Sized for a big workspace, where 10k custom emoji is about a megabyte of JSON:
+
+- the snapshot is held for **24 hours**, and only the very first request ever waits on Slack — after that a stale list is served immediately and refreshed behind it
+- the body is gzipped once per snapshot, not per request (~1 MB becomes ~200 KB on the wire), and carries an ETag so an hourly revalidation costs a 304
+- the `https://emoji.slack-edge.com/<team>/` prefix every URL shares is sent once instead of 10k times, which gzip barely notices but takes what each browser stores in `localStorage` from ~1 MB to ~650 KB
+- the picker's Slack grid stays closed until something is typed, since an unfiltered grid of 10k is just the a's
+
+Because it hooks a UI it does not own, the script is written to fail quietly: every hook is guarded, and if decorating ever runs away it stops watching the DOM instead of pinning the tab. It was written against Chatwoot **4.17.1**, whose composer is ProseMirror — text goes in through `execCommand("insertText")` over a selected range, the path a paste takes, so ProseMirror's own state stays in sync. Older builds with a `<textarea>` composer are handled too. A Chatwoot upgrade that reworks the picker or the `:` popover can silently switch the script off; the emoji list endpoint keeps working either way.
+
+Shortcodes still show as literal text inside Chatwoot's conversation view — this covers composing, not rendering sent messages.
+
 ## Development
 
 ```bash
@@ -103,7 +140,7 @@ npm run typecheck
 npm run db:generate   # after editing src/db/schema.ts
 ```
 
-Layout: `src/bridges.ts` (bridge registry: one Bolt app + `ExpressReceiver` per bridge, mounted at `/slack/events/{slug}`), `src/slack/events.ts` (message + reaction handlers), `src/slack/post.ts` (posting with identity resolution), `src/slack/oauth.ts` (`/link` and admin sign-in via the hub app), `src/slack/manifest.ts` (per-bridge Slack manifest), `src/chatwoot/client.ts` (typed wrapper over the public + application APIs), `src/chatwoot/webhook.ts`, `src/admin/api.ts`, `src/retry.ts`, `web/` (control panel).
+Layout: `src/bridges.ts` (bridge registry: one Bolt app + `ExpressReceiver` per bridge, mounted at `/slack/events/{slug}`), `src/slack/events.ts` (message + reaction handlers), `src/slack/post.ts` (posting with identity resolution), `src/slack/oauth.ts` (`/link` and admin sign-in via the hub app), `src/slack/manifest.ts` (per-bridge Slack manifest), `src/chatwoot/client.ts` (typed wrapper over the public + application APIs), `src/chatwoot/webhook.ts`, `src/admin/api.ts`, `src/dashboard.ts` + `public/slack-emoji.js` (the Chatwoot dashboard script), `src/retry.ts`, `web/` (control panel).
 
 ## License
 
