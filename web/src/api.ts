@@ -86,14 +86,9 @@ export interface Retry {
   lastError: string | null;
   createdAt: string;
 }
-export interface Channel {
-  id: string;
-  name: string;
-  isMember: boolean;
-}
 export interface SlackIntrospection {
   bot: { userId?: string; botId?: string; name?: string; team?: string };
-  channels: Channel[];
+  channel?: { id: string; name?: string; isMember: boolean; error?: string };
 }
 export interface Introspection {
   profile: { id: number; name: string; email: string };

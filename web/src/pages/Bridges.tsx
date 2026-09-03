@@ -180,18 +180,19 @@ function BridgeForm({ bridge, onDone, onCancel }: { bridge: Bridge | null; onDon
     return () => clearTimeout(t);
   }, [d.chatwootApiToken]);
 
-  // Slack bot token (or the saved one) -> bot identity + channels.
+  // Slack bot token (or the saved one) -> bot identity; plus a check of the typed channel ID.
   useEffect(() => {
-    const body = d.slackBotToken.length > 10 ? { botToken: d.slackBotToken } : bridge ? { bridgeId: bridge.id } : null;
-    if (!body) return;
+    const base = d.slackBotToken.length > 10 ? { botToken: d.slackBotToken } : bridge ? { bridgeId: bridge.id } : null;
+    if (!base) return;
+    const channelOk = /^[CG][A-Z0-9]{6,}$/.test(d.slackChannel);
     const t = setTimeout(() => {
       api
-        .post<SlackIntrospection>("/slack/introspect", body)
+        .post<SlackIntrospection>("/slack/introspect", { ...base, ...(channelOk ? { channel: d.slackChannel } : {}) })
         .then((r) => (setSl(r), setSlErr(null)))
         .catch((e) => (setSl(null), setSlErr(e.message)));
     }, 400);
     return () => clearTimeout(t);
-  }, [d.slackBotToken, bridge]);
+  }, [d.slackBotToken, d.slackChannel, bridge]);
 
   const account = cw?.accounts.find((a) => String(a.id) === d.chatwootAccountId);
 
@@ -284,20 +285,21 @@ function BridgeForm({ bridge, onDone, onCancel }: { bridge: Bridge | null; onDon
           <input value={d.slackSigningSecret} onChange={set("slackSigningSecret")} placeholder={bridge ? "••••••••" : "Basic Information → App Credentials"} required={!bridge} autoComplete="off" />
         </div>
         <div className="field">
-          <label>Slack channel</label>
-          {sl ? (
-            <select value={d.slackChannel} onChange={set("slackChannel")} required>
-              <option value="">Select…</option>
-              {sl.channels.map((c) => (
-                <option key={c.id} value={c.id}>
-                  #{c.name}
-                  {c.isMember ? "" : " (bot not a member)"}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <input value={d.slackChannel} onChange={set("slackChannel")} required placeholder="C0123456789 (paste the bot token to pick from a list)" />
-          )}
+          <label>Slack channel ID</label>
+          <input value={d.slackChannel} onChange={set("slackChannel")} required pattern="[CG][A-Z0-9]+" placeholder="C0123456789" />
+          <p className="note">Channel details → scroll to the bottom of the About tab.</p>
+          {sl?.channel &&
+            (sl.channel.error ? (
+              <p className="err">Bot can't see this channel ({sl.channel.error}). Invite it: /invite @{sl.bot.name}</p>
+            ) : sl.channel.isMember ? (
+              <p className="note">
+                #{sl.channel.name} — <span className="pill ok">bot is a member</span>
+              </p>
+            ) : (
+              <p className="note">
+                #{sl.channel.name} — <span className="pill warn">bot not a member yet</span>; run /invite @{sl.bot.name} there.
+              </p>
+            ))}
         </div>
       </div>
 

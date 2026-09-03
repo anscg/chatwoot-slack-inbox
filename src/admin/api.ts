@@ -239,28 +239,32 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
     }),
   );
 
-  /** Paste a bridge's bot token (or name an existing bridge) -> bot identity + channels it can see. */
+  /** Paste a bridge's bot token (or name an existing bridge) -> bot identity, and optionally check one channel ID. */
   api.post(
     "/slack/introspect",
     wrap(async (req, res) => {
-      const input = z.object({ botToken: z.string().trim().min(1).optional(), bridgeId: z.number().int().optional() }).safeParse(req.body);
+      const input = z
+        .object({ botToken: z.string().trim().min(1).optional(), bridgeId: z.number().int().optional(), channel: z.string().trim().optional() })
+        .safeParse(req.body);
       if (!input.success || (!input.data.botToken && !input.data.bridgeId)) return badRequest(res, "botToken or bridgeId required");
       const client = input.data.botToken ? slackClient(input.data.botToken) : ctx.bridges.get(input.data.bridgeId!)?.slack;
       if (!client) return badRequest(res, "bridge not loaded");
+      let auth;
       try {
-        const auth = await client.auth.test();
-        const channels: { id: string; name: string; isMember: boolean }[] = [];
-        let cursor: string | undefined;
-        do {
-          const page = await client.conversations.list({ types: "public_channel", exclude_archived: true, limit: 1000, cursor });
-          for (const c of page.channels ?? []) if (c.id && c.name) channels.push({ id: c.id, name: c.name, isMember: Boolean(c.is_member) });
-          cursor = page.response_metadata?.next_cursor || undefined;
-        } while (cursor);
-        channels.sort((a, b) => a.name.localeCompare(b.name));
-        res.json({ bot: { userId: auth.user_id, botId: auth.bot_id, name: auth.user, team: auth.team }, channels });
+        auth = await client.auth.test();
       } catch (err) {
         return badRequest(res, `Slack rejected that token: ${err instanceof Error ? err.message : String(err)}`);
       }
+      let channel: { id: string; name?: string; isMember: boolean; error?: string } | undefined;
+      if (input.data.channel && /^[CG][A-Z0-9]+$/.test(input.data.channel)) {
+        try {
+          const info = await client.conversations.info({ channel: input.data.channel });
+          channel = { id: input.data.channel, name: info.channel?.name, isMember: Boolean(info.channel?.is_member) };
+        } catch (err) {
+          channel = { id: input.data.channel, isMember: false, error: (err as { data?: { error?: string } })?.data?.error ?? (err as Error).message };
+        }
+      }
+      res.json({ bot: { userId: auth.user_id, botId: auth.bot_id, name: auth.user, team: auth.team }, channel });
     }),
   );
 
