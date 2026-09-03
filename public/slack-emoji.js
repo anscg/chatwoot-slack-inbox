@@ -1,19 +1,27 @@
 /**
- * Slack custom emoji for the Chatwoot agent dashboard.
+ * Slack emoji for the Chatwoot agent dashboard.
  *
  * Chatwoot only knows Unicode emoji, so a workspace's custom ones (:parrot:, :yay:) are
- * invisible to agents. This script adds them in the two places agents reach for emoji:
+ * invisible to agents. This script makes both of Chatwoot's emoji surfaces Slack's:
  *
- *   1. a "Slack" section pinned to the top of the emoji picker, following its search box
- *   2. the `:` typeahead, where Slack matches are listed above Chatwoot's Unicode ones
+ *   1. the emoji picker — Chatwoot's grid is replaced by one list holding the workspace's
+ *      custom emoji and the standard set together
+ *   2. the `:` typeahead — the same list, Slack matches first, replacing Chatwoot's own
+ *   3. message bubbles — `:shortcode:` renders as the emoji instead of as text
  *
- * Both insert the plain shortcode `:name:`, which Slack expands when the bridge relays
- * the reply. The list comes from this bridge's /dashboard/slack-emoji.json.
+ * A custom emoji is inserted as the plain shortcode `:name:`, which Slack expands when the
+ * bridge relays the reply; a standard one is inserted as the character, exactly as Chatwoot
+ * would have.
  *
- * Chatwoot's composer is ProseMirror (a contenteditable), so text goes in through
- * execCommand("insertText") over a selected range — the same path a paste takes — which
- * is what keeps ProseMirror's own state in sync. Older Chatwoot builds used a textarea;
- * both are handled.
+ * Custom emoji are searched on the bridge rather than downloaded: a workspace can hold tens
+ * of thousands of them, which is megabytes of JSON no dashboard tab should be parsing. Only
+ * matches and the names a message mentions come over the wire, and both are memoised here.
+ * The standard set is small and static, so it ships as unicode-emoji.json next to this file
+ * (Chatwoot's own list, so agents keep the glyphs and search terms they know).
+ *
+ * Chatwoot's composer is ProseMirror, a contenteditable it reconciles on every change, so
+ * text goes in through execCommand("insertText") over a selected range — the path a paste
+ * takes — and nothing is ever written into the composer's DOM directly.
  *
  * Load it from Chatwoot's DASHBOARD_SCRIPTS, either from the bridge itself:
  *   <script src="https://bridge.example.com/dashboard/slack-emoji.js"></script>
@@ -28,13 +36,25 @@
   var SOURCE = (SELF && SELF.src) || "";
   var BRIDGE = (SELF && (SELF.getAttribute("data-bridge") || queryParam(SOURCE, "bridge"))) || "";
   var DATA_URL = dataUrl();
-  var CACHE_KEY = "cw-slack-emoji:v2:" + DATA_URL;
-  var CACHE_TTL = 24 * 60 * 60 * 1000;
-  var MAX_IN_TYPEAHEAD = 6;
-  var MAX_IN_PICKER = 300;
+  var UNICODE_URL = SOURCE ? SOURCE.replace(/slack-emoji\.js(\?.*)?$/, "unicode-emoji.json") : "/dashboard/unicode-emoji.json";
+  var SEARCH_URL = DATA_URL.replace(/slack-emoji\.json$/, "slack-emoji/search");
+  var LOOKUP_URL = DATA_URL.replace(/slack-emoji\.json$/, "slack-emoji/lookup");
 
-  /** [{name, url}] sorted by name; empty until the list arrives. */
-  var emoji = [];
+  var TYPEAHEAD_CUSTOM = 8; // Slack rows before the standard ones in the `:` list
+  var TYPEAHEAD_STANDARD = 8;
+  var PICKER_CUSTOM = 120; // images cost a request each, so the searched grid stays bounded
+  var PICKER_STANDARD = 300;
+  var DEBOUNCE_MS = 120;
+  var DONE = "data-slack-emoji"; // marks what has been handled, and keeps the observer cheap
+
+  /** Standard emoji, held locally: {name, slug, char, group}. */
+  var standard = [];
+  var groups = [];
+
+  /** Custom emoji the bridge has told us about so far, by name: {name, url}. */
+  var known = Object.create(null);
+  var searches = Object.create(null); // query -> [names], so a repeated keystroke costs nothing
+  var missing = Object.create(null); // names the bridge said it does not have
 
   function warn(message, detail) {
     if (window.console) console.warn("[slack-emoji] " + message, detail || "");
@@ -57,7 +77,7 @@
     if (!SOURCE) return "/dashboard/slack-emoji.json";
     try {
       if (new URL(SOURCE, location.href).origin !== location.origin) {
-        warn("loaded from another origin without data-bridge=\"https://your-bridge\"; no emoji will load");
+        warn('loaded from another origin without data-bridge="https://your-bridge"; no emoji will load');
       }
     } catch (err) {
       /* opaque src; fall through and try anyway */
@@ -65,65 +85,147 @@
     return SOURCE.replace(/slack-emoji\.js(\?.*)?$/, "slack-emoji.json");
   }
 
-  // ---------------------------------------------------------------- emoji list
-
-  function cached() {
-    try {
-      var parsed = JSON.parse(window.localStorage.getItem(CACHE_KEY) || "null");
-      return parsed && Date.now() - parsed.at < CACHE_TTL ? parsed : null;
-    } catch (err) {
-      return null;
-    }
+  function json(res) {
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return res.json();
   }
 
-  /** The server sends the shared `https://emoji.slack-edge.com/<team>/` prefix separately. */
-  function adopt(body) {
-    var map = body.emoji || {};
+  /** Fold a `{prefix, emoji}` answer into what we know, and hand back the names it carried. */
+  function absorb(body) {
     var prefix = body.prefix || "";
-    emoji = Object.keys(map)
-      .sort()
-      .map(function (name) {
-        return { name: name, url: prefix + map[name] };
-      });
-    decorate(); // a picker may already be open when the list lands
+    var map = body.emoji || {};
+    var names = Object.keys(map);
+    for (var i = 0; i < names.length; i++) {
+      var value = map[names[i]];
+      known[names[i]] = { name: names[i], url: /^https?:/.test(value) ? value : prefix + value };
+    }
+    return names;
   }
 
-  function load() {
-    var fromCache = cached();
-    if (fromCache) adopt(fromCache);
-    fetch(DATA_URL, { credentials: "omit" })
-      .then(function (res) {
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        return res.json();
-      })
+  function searchCustom(query, limit, then) {
+    var q = normalise(query);
+    if (!q) return then([]);
+    if (searches[q]) return then(named(searches[q], limit));
+    fetch(SEARCH_URL + "?limit=" + PICKER_CUSTOM + "&q=" + encodeURIComponent(q), { credentials: "omit" })
+      .then(json)
       .then(function (body) {
-        adopt(body);
-        try {
-          window.localStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), prefix: body.prefix, emoji: body.emoji }));
-        } catch (err) {
-          /* a big workspace can outgrow the quota; the in-memory copy still serves this tab */
-        }
+        searches[q] = absorb(body);
+        then(named(searches[q], limit));
       })
       .catch(function (err) {
-        if (!fromCache) warn("could not load the emoji list from " + DATA_URL, err);
+        searches[q] = [];
+        warn("emoji search failed", err);
+        then([]);
+      });
+    return undefined;
+  }
+
+  function named(names, limit) {
+    var out = [];
+    for (var i = 0; i < names.length && out.length < limit; i++) if (known[names[i]]) out.push(known[names[i]]);
+    return out;
+  }
+
+  // Opening a conversation renders every message at once, so the names they mention are
+  // pooled for a tick and asked for together instead of one request per bubble.
+  var pooled = Object.create(null);
+  var waiting = [];
+  var flushing = null;
+
+  function lookup(names, then) {
+    var wanted = names.filter(function (name) {
+      return !known[name] && !missing[name];
+    });
+    if (!wanted.length) return then();
+    for (var i = 0; i < wanted.length; i++) pooled[wanted[i]] = true;
+    waiting.push(then);
+    if (!flushing) flushing = setTimeout(flushLookups, 30);
+    return undefined;
+  }
+
+  function flushLookups() {
+    flushing = null;
+    var names = Object.keys(pooled);
+    var callbacks = waiting;
+    pooled = Object.create(null);
+    waiting = [];
+
+    var batches = [];
+    for (var i = 0; i < names.length; i += 200) batches.push(names.slice(i, i + 200));
+
+    Promise.all(
+      batches.map(function (batch) {
+        return fetch(LOOKUP_URL + "?names=" + encodeURIComponent(batch.join(",")), { credentials: "omit" })
+          .then(json)
+          .then(absorb)
+          .catch(function (err) {
+            warn("emoji lookup failed", err);
+          });
+      }),
+    ).then(function () {
+      for (var j = 0; j < names.length; j++) if (!known[names[j]]) missing[names[j]] = true;
+      for (var k = 0; k < callbacks.length; k++) callbacks[k]();
+    });
+  }
+
+  function loadStandard() {
+    fetch(UNICODE_URL, { credentials: "omit" })
+      .then(json)
+      .then(function (body) {
+        groups = body.groups || [];
+        standard = (body.emoji || []).map(function (row) {
+          return { char: row[0], name: row[1], slug: row[2], group: row[3] };
+        });
+        redraw();
+      })
+      .catch(function (err) {
+        warn("could not load the standard emoji list from " + UNICODE_URL + "; only custom emoji will show", err);
       });
   }
 
-  /** Substring match, earliest hit first, then shortest name. */
-  function search(query, limit) {
-    var q = String(query || "").toLowerCase().replace(/^:+|:+$/g, "");
-    if (!q) return emoji.slice(0, limit);
+  /** A list can land after a picker is open or a bubble is drawn; both are redone in place. */
+  var drawers = [];
+
+  function redraw() {
+    drawers = drawers.filter(function (drawer) {
+      return drawer.node.isConnected;
+    });
+    for (var i = 0; i < drawers.length; i++) drawers[i].draw();
+  }
+
+  function normalise(query) {
+    return String(query || "").toLowerCase().replace(/:/g, "").trim();
+  }
+
+  function searchStandard(query, limit) {
+    var q = normalise(query).replace(/_/g, " ");
+    if (!q) return [];
     var hits = [];
-    for (var i = 0; i < emoji.length; i++) {
-      var at = emoji[i].name.indexOf(q);
-      if (at !== -1) hits.push({ item: emoji[i], at: at });
+    for (var i = 0; i < standard.length; i++) {
+      var item = standard[i];
+      var at = item.name.indexOf(q);
+      if (at === -1) at = item.slug.replace(/_/g, " ").indexOf(q);
+      if (at !== -1) hits.push({ at: at, key: item.name, item: item });
     }
     hits.sort(function (a, b) {
-      return a.at - b.at || a.item.name.length - b.item.name.length || (a.item.name < b.item.name ? -1 : 1);
+      return a.at - b.at || a.key.length - b.key.length || (a.key < b.key ? -1 : 1);
     });
-    return hits.slice(0, limit).map(function (h) {
-      return h.item;
+    return hits.slice(0, limit).map(function (hit) {
+      return hit.item;
     });
+  }
+
+  /** One trailing call per burst of typing, so a fast typist makes one request, not eight. */
+  function debounce(fn) {
+    var timer = null;
+    return function () {
+      var args = arguments;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(function () {
+        timer = null;
+        fn.apply(null, args);
+      }, DEBOUNCE_MS);
+    };
   }
 
   // ---------------------------------------------------------------- the composer
@@ -162,47 +264,46 @@
     return null;
   }
 
-  /** The last `:query` in the editor's text, as a DOM range we can overwrite. */
-  function triggerRange(el, query) {
-    var needle = ":" + query;
+  /**
+   * The `:query` at the end of the editor's text. The popover's own search box can run ahead
+   * of what the editor holds, so the trigger is found by its shape rather than by the query.
+   */
+  function triggerAtEnd(el) {
     var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    var last = null;
     var node;
-    var found = null;
-    while ((node = walker.nextNode())) {
-      var at = node.data.lastIndexOf(needle);
-      if (at !== -1) found = { node: node, start: at, end: at + needle.length };
-    }
-    return found;
+    while ((node = walker.nextNode())) if (node.data) last = node;
+    if (!last) return null;
+    var match = /:[a-z0-9_+'-]*$/i.exec(last.data);
+    return match ? { node: last, start: match.index, end: last.data.length } : null;
   }
 
   /**
-   * Insert `:name: `, replacing the `:query` that triggered the typeahead when there is one.
-   * execCommand is deprecated but is still the only way to hand text to ProseMirror from
-   * outside without a reference to its EditorView: it fires the same beforeinput the editor
-   * already handles for typing and pasting.
+   * execCommand is deprecated but remains the only way to hand text to ProseMirror without a
+   * reference to its EditorView: it raises the same beforeinput the editor already handles
+   * for typing and pasting, so the editor's own state stays authoritative.
    */
-  function insertShortcode(name, query, near) {
+  function insert(item, replaceTrigger, near) {
     var editor = currentEditor(near);
     if (!editor) return;
-    var text = ":" + name + ": ";
+    var text = item.char ? item.char : ":" + item.name + ": ";
 
     if (!editor.rich) {
       var el = editor.el;
       var from = el.selectionStart;
-      var to = el.selectionEnd;
-      if (query != null) {
-        var before = el.value.slice(0, from).lastIndexOf(":" + query);
-        if (before !== -1) from = before;
+      if (replaceTrigger) {
+        var trigger = /:[a-z0-9_+'-]*$/i.exec(el.value.slice(0, from));
+        if (trigger) from = trigger.index;
       }
       el.focus();
-      el.setRangeText(text, from, to, "end");
+      el.setRangeText(text, from, el.selectionEnd, "end");
       el.dispatchEvent(new Event("input", { bubbles: true }));
       return;
     }
 
     editor.el.focus();
-    if (query != null) {
-      var span = triggerRange(editor.el, query);
+    if (replaceTrigger) {
+      var span = triggerAtEnd(editor.el);
       if (span) {
         var range = document.createRange();
         range.setStart(span.node, span.start);
@@ -215,258 +316,250 @@
     document.execCommand("insertText", false, text);
   }
 
-  // ---------------------------------------------------------------- the emoji picker
-
-  /** The picker is a dialog holding a search box and a grid of emoji buttons. */
-  function isEmojiDialog(node) {
-    if (!node.matches) return false;
-    if (node.matches(".emoji-dialog")) return true;
-    return node.matches('[role="dialog"]') && !!node.querySelector("input") && !!node.querySelector(".grid button, .emoji--row button");
-  }
-
-  function findDialogs(root) {
-    var out = [];
-    if (isEmojiDialog(root)) out.push(root);
-    var candidates = root.querySelectorAll ? root.querySelectorAll('.emoji-dialog, [role="dialog"]') : [];
-    for (var i = 0; i < candidates.length; i++) if (isEmojiDialog(candidates[i])) out.push(candidates[i]);
-    return out;
-  }
-
-  function decorateDialog(dialog) {
-    if (!emoji.length || dialog.querySelector(".cw-slack-section")) return;
-
-    var section = document.createElement("div");
-    section.className = "cw-slack-section";
-    section.innerHTML = '<h5 class="cw-slack-title">Slack</h5><div class="cw-slack-grid"></div><p class="cw-slack-empty"></p>';
-    var grid = section.querySelector(".cw-slack-grid");
-    var empty = section.querySelector(".cw-slack-empty");
-
-    function fill(query) {
-      // With thousands of emoji an unfiltered grid is just the first few hundred names
-      // alphabetically, so it stays closed until there is something to match on.
-      if (!String(query || "").replace(/:/g, "").trim()) {
-        grid.innerHTML = "";
-        empty.hidden = false;
-        empty.textContent = "Type to search " + emoji.length.toLocaleString() + " Slack emoji.";
-        return;
-      }
-      var hits = search(query, MAX_IN_PICKER);
-      grid.innerHTML = hits
-        .map(function (item) {
-          return '<button type="button" class="cw-slack-btn" title=":' + item.name + ':" data-emoji="' + item.name + '"><img src="' + item.url + '" alt=":' + item.name + ':" loading="lazy"></button>';
-        })
-        .join("");
-      empty.hidden = hits.length > 0;
-      empty.textContent = "No Slack emoji match.";
-    }
-
-    section.addEventListener("mousedown", function (e) {
-      e.preventDefault(); // don't let the dialog steal the selection we are about to replace
-    });
-    section.addEventListener("click", function (e) {
-      var button = e.target.closest("[data-emoji]");
-      if (!button) return;
-      insertShortcode(button.getAttribute("data-emoji"), null, dialog);
-      closePicker();
-    });
-
-    // Sit between the search box and the (virtualised) Unicode grid rather than inside it.
-    var scroller = dialog.querySelector(".emoji-item") || scrollableIn(dialog);
-    if (scroller && scroller.parentElement) scroller.parentElement.insertBefore(section, scroller);
-    else dialog.appendChild(section);
-
-    var box = dialog.querySelector('input[type="text"], input[type="search"]');
-    if (box) {
-      box.addEventListener("input", function () {
-        fill(box.value);
-      });
-    }
-    fill(box ? box.value : "");
-  }
-
   /** Chatwoot closes both pickers on Escape; ours reuses that rather than reaching into Vue. */
   function closePicker() {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   }
 
-  function scrollableIn(dialog) {
+  // ---------------------------------------------------------------- shared rendering
+
+  function esc(value) {
+    return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function faceFor(item) {
+    return item.char
+      ? '<span class="cw-slack-glyph">' + esc(item.char) + "</span>"
+      : '<img class="cw-slack-img" src="' + esc(item.url) + '" alt="" loading="lazy">';
+  }
+
+  function tileFor(item, index) {
+    var label = item.char ? item.name : ":" + item.name + ":";
+    return '<button type="button" class="cw-slack-tile" title="' + esc(label) + '" data-i="' + index + '">' + faceFor(item) + "</button>";
+  }
+
+  /** One flat array behind both surfaces, so a click and a keypress resolve the same way. */
+  var shown = [];
+
+  function itemAt(node) {
+    var index = node && node.getAttribute("data-i");
+    return index == null ? null : shown[Number(index)];
+  }
+
+  // ---------------------------------------------------------------- the emoji picker
+
+  function isEmojiDialog(node) {
+    if (!node || !node.matches) return false;
+    if (node.matches(".emoji-dialog")) return true;
+    return node.matches('[role="dialog"]') && !!node.querySelector("input") && !!node.querySelector(".grid button, .emoji--row button");
+  }
+
+  function takeOverDialog(dialog) {
+    dialog.setAttribute(DONE, "");
+    var scroller = nativeScroller(dialog);
+    if (!scroller) return;
+    scroller.style.display = "none"; // Chatwoot's own grid; ours replaces it in place
+
+    var panel = document.createElement("div");
+    panel.className = "cw-slack-panel";
+    scroller.parentElement.insertBefore(panel, scroller.nextSibling);
+
+    var box = dialog.querySelector('input[type="text"], input[type="search"]');
+
+    // The Slack half arrives from the bridge, so the standard half is painted at once and
+    // the Slack section drops in above it when the answer lands.
+    function draw() {
+      paint([]);
+      var query = box ? box.value : "";
+      if (normalise(query)) searchSoon(query, paint);
+    }
+
+    var searchSoon = debounce(function (query, then) {
+      searchCustom(query, PICKER_CUSTOM, function (hits) {
+        if (box && box.value === query) then(hits);
+      });
+    });
+
+    function paint(hits) {
+      var query = box ? box.value : "";
+      var parts = [];
+      shown = [];
+
+      if (hits.length) parts.push(section("Slack", hits));
+
+      if (normalise(query)) {
+        var matches = searchStandard(query, PICKER_STANDARD);
+        if (matches.length) parts.push(section("Emoji", matches));
+        if (!hits.length && !matches.length) parts.push('<p class="cw-slack-note">Searching Slack…</p>');
+      } else {
+        // Idle: the standard set, grouped the way Chatwoot groups it.
+        for (var g = 0; g < groups.length; g++) {
+          var inGroup = standard.filter(byGroup(g));
+          if (inGroup.length) parts.push(section(groups[g], inGroup));
+        }
+      }
+      panel.innerHTML = parts.join("");
+    }
+
+    function section(title, items) {
+      var tiles = items
+        .map(function (item) {
+          shown.push(item);
+          return tileFor(item, shown.length - 1);
+        })
+        .join("");
+      return '<h5 class="cw-slack-heading">' + esc(title) + '</h5><div class="cw-slack-grid">' + tiles + "</div>";
+    }
+
+    panel.addEventListener("mousedown", function (e) {
+      e.preventDefault(); // keep the composer's selection, which is what we are about to replace
+    });
+    panel.addEventListener("click", function (e) {
+      var tile = e.target.closest("[data-i]");
+      if (!tile) return;
+      var item = itemAt(tile);
+      if (!item) return;
+      insert(item, false, dialog);
+      closePicker();
+    });
+    if (box) box.addEventListener("input", draw);
+    drawers.push({ node: dialog, draw: draw });
+    draw();
+  }
+
+  function byGroup(index) {
+    return function (item) {
+      return item.group === index;
+    };
+  }
+
+  /** Chatwoot's own emoji list: the one scrolling box inside the dialog. */
+  function nativeScroller(dialog) {
     var divs = dialog.querySelectorAll("div");
     for (var i = 0; i < divs.length; i++) {
       if (divs[i].scrollHeight > divs[i].clientHeight + 8) return divs[i];
     }
-    return null;
-  }
-
-  /**
-   * Decorating means writing to the DOM, which the observer below would see as a change to
-   * decorate again, so it is detached for the duration. The budget is a second line of
-   * defence: if something still manages to loop, the observer is dropped rather than
-   * pinning the tab's main thread.
-   */
-  var observer = null;
-  var budget = { count: 0, since: 0 };
-  var scheduled = false;
-
-  function decorate() {
-    var now = Date.now();
-    if (now - budget.since > 1000) {
-      budget.since = now;
-      budget.count = 0;
-    }
-    if (++budget.count > 60) {
-      if (observer) observer.disconnect();
-      observer = null;
-      warn("decorating too often; stopped watching the DOM");
-      return;
-    }
-    if (observer) observer.disconnect();
-    try {
-      var dialogs = findDialogs(document.body);
-      for (var i = 0; i < dialogs.length; i++) decorateDialog(dialogs[i]);
-      var popover = findEmojiPopover();
-      if (popover) decoratePopover(popover);
-    } finally {
-      if (observer) {
-        observer.takeRecords();
-        observer.observe(document.documentElement, { childList: true, subtree: true });
-      }
-    }
+    return dialog.querySelector(".emoji-item");
   }
 
   // ---------------------------------------------------------------- the `:` typeahead
 
-  // Chatwoot ships its own `:` picker (a combobox teleported to the body, listing Unicode
-  // emoji). Rather than fight it, Slack matches are added to the same list, above the
-  // Unicode ones. Its own keyboard handling stays in charge until the selection moves up
-  // into the Slack rows, at which point the arrow/Enter/Tab keys are claimed in the capture
-  // phase so Chatwoot's document-level handlers never see them.
-  var slackIndex = -1; // -1 = Chatwoot's list has the selection
+  // Chatwoot ships its own `:` picker: a combobox teleported to the body, listing Unicode
+  // emoji. Its list is hidden and ours put in its place, holding the workspace's custom
+  // emoji first and the standard ones after, so one list answers the whole `:` query. Its
+  // keys are claimed in the capture phase, ahead of Chatwoot's document-level handlers.
+  var selected = 0;
 
-  // Chatwoot uses the same popover for canned responses and variables; the emoji one is
-  // recognised once, by its rows carrying `:shortcode:` subtitles, and remembered after that.
-  var knownEmojiPopovers = new WeakSet();
+  function isEmojiPopover(node) {
+    if (!node || !node.matches || !node.matches("[data-popover-content]")) return false;
+    var row = node.querySelector('[role="option"]');
+    // The emoji list is the one whose rows carry a `:shortcode:` subtitle.
+    return !!row && /:[a-z0-9_+'-]{2,}:/.test(row.textContent || "");
+  }
 
-  function findEmojiPopover() {
-    var popovers = document.querySelectorAll("[data-popover-content]");
-    for (var i = 0; i < popovers.length; i++) {
-      var popover = popovers[i];
-      if (knownEmojiPopovers.has(popover)) return popover;
-      var list = popover.querySelector('ul[role="listbox"]');
-      if (!list || !popover.querySelector("input")) continue;
-      var row = list.querySelector('[role="option"]');
-      if (row && /(^|\s):[a-z0-9_+-]+:/.test(row.textContent || "")) {
-        knownEmojiPopovers.add(popover);
-        return popover;
-      }
+  function takeOverPopover(popover) {
+    popover.setAttribute(DONE, "emoji");
+    var list = popover.querySelector('ul[role="listbox"]');
+    var box = popover.querySelector("input");
+    if (!list || !box) return;
+    list.style.display = "none";
+    var status = popover.querySelector('[role="status"]');
+    if (status) status.style.display = "none";
+
+    var ours = document.createElement("ul");
+    ours.className = "cw-slack-rows";
+    ours.setAttribute("role", "listbox");
+    list.parentElement.insertBefore(ours, list);
+
+    function draw() {
+      paint([]);
+      var query = box.value;
+      if (normalise(query)) searchSoon(query, paint);
     }
+
+    var searchSoon = debounce(function (query, then) {
+      searchCustom(query, TYPEAHEAD_CUSTOM, function (hits) {
+        if (box.value === query) then(hits);
+      });
+    });
+
+    function paint(hits) {
+      var query = box.value;
+      shown = hits.concat(searchStandard(query, TYPEAHEAD_STANDARD));
+      selected = 0;
+      ours.innerHTML = shown.length
+        ? shown
+            .map(function (item, i) {
+              return (
+                '<li role="option" class="cw-slack-row' +
+                (i === 0 ? " is-active" : "") +
+                '" data-i="' +
+                i +
+                '">' +
+                faceFor(item) +
+                '<span class="cw-slack-row-name">' +
+                esc(item.name) +
+                '</span><span class="cw-slack-row-code">' +
+                esc(item.char ? "" : ":" + item.name + ":") +
+                "</span></li>"
+              );
+            })
+            .join("")
+        : '<li class="cw-slack-note">Searching…</li>';
+      if (status) status.style.display = "none";
+    }
+
+    ours.addEventListener("mousedown", function (e) {
+      e.preventDefault();
+    });
+    ours.addEventListener("mousemove", function (e) {
+      var row = e.target.closest("[data-i]");
+      if (row) highlight(Number(row.getAttribute("data-i")));
+    });
+    ours.addEventListener("click", function (e) {
+      var row = e.target.closest("[data-i]");
+      if (row) choose(itemAt(row));
+    });
+
+    box.addEventListener("input", draw);
+    drawers.push({ node: popover, draw: draw });
+    draw();
+  }
+
+  function openPopover() {
+    var popovers = document.querySelectorAll('[data-popover-content][' + DONE + '="emoji"]');
+    for (var i = 0; i < popovers.length; i++) if (popovers[i].isConnected) return popovers[i];
     return null;
   }
 
-  function popoverQuery(popover) {
-    var input = popover.querySelector("input");
-    return input ? input.value : "";
-  }
-
-  function decoratePopover(popover) {
-    if (!emoji.length) return;
-    var list = popover.querySelector('ul[role="listbox"]');
-    if (!list) return;
-
-    var host = list.parentElement || popover;
-    var section = host.querySelector(".cw-slack-rows");
-    if (!section) {
-      // Outside the <ul>, which Vue re-renders on every keystroke, but inside its scroll area.
-      section = document.createElement("div");
-      section.className = "cw-slack-rows";
-      section.addEventListener("mousedown", function (e) {
-        e.preventDefault();
-      });
-      section.addEventListener("click", function (e) {
-        var row = e.target.closest("[data-emoji]");
-        if (row) pick(row.getAttribute("data-emoji"), popoverQuery(popover));
-      });
-      host.insertBefore(section, list);
-    }
-
-    var query = popoverQuery(popover);
-    if (section.dataset.query === query) return; // nothing to redraw
-    section.dataset.query = query;
-    var hits = search(query, MAX_IN_TYPEAHEAD);
-    slackIndex = -1;
-    section.innerHTML = hits.length
-      ? '<div class="cw-slack-rows-title">Slack</div>' +
-        hits
-          .map(function (item, i) {
-            return '<div class="cw-slack-row" data-emoji="' + item.name + '" data-i="' + i + '"><img src="' + item.url + '" alt="" loading="lazy"><span class="cw-slack-row-name">' + item.name + '</span><span class="cw-slack-row-code">:' + item.name + ':</span></div>';
-          })
-          .join("")
-      : "";
-    section.hidden = !hits.length;
-    popover.classList.toggle("cw-slack-has-rows", hits.length > 0);
-  }
-
-  function slackRows() {
-    var popover = findEmojiPopover();
-    return popover ? popover.querySelectorAll(".cw-slack-row") : [];
-  }
-
   function highlight(index) {
-    var rows = slackRows();
-    slackIndex = index;
-    for (var i = 0; i < rows.length; i++) rows[i].classList.toggle("is-active", i === index);
-    if (rows[index]) rows[index].scrollIntoView({ block: "nearest" });
-    // Chatwoot keeps its own row highlighted; dim it while the Slack section has the selection.
-    var popover = findEmojiPopover();
-    if (popover) popover.classList.toggle("cw-slack-owns-selection", index >= 0);
+    var popover = openPopover();
+    if (!popover) return;
+    var rows = popover.querySelectorAll(".cw-slack-row");
+    if (!rows.length) return;
+    selected = (index + rows.length) % rows.length;
+    for (var i = 0; i < rows.length; i++) rows[i].classList.toggle("is-active", i === selected);
+    rows[selected].scrollIntoView({ block: "nearest" });
   }
 
-  function pick(name, query) {
-    highlight(-1);
-    insertShortcode(name, query);
-    // Removing the trigger text usually closes the picker on its own; Escape covers the rest.
-    if (findEmojiPopover()) closePicker();
-  }
-
-  /** Chatwoot's selected row index, from the combobox's aria-activedescendant. */
-  function nativeIndex(popover) {
-    var input = popover.querySelector("input");
-    var active = input && input.getAttribute("aria-activedescendant");
-    var row = active && popover.querySelector("#" + CSS.escape(active));
-    var index = row && row.getAttribute("data-index");
-    return index == null ? -1 : Number(index);
+  function choose(item) {
+    if (!item) return;
+    insert(item, true, null);
+    closePicker();
   }
 
   document.addEventListener(
     "keydown",
     function (e) {
-      var popover = findEmojiPopover();
-      if (!popover) return;
-      var rows = slackRows();
-      if (!rows.length) return;
-      var query = popoverQuery(popover);
-
-      if (e.key === "ArrowUp") {
-        if (slackIndex > 0) {
-          claim(e);
-          highlight(slackIndex - 1);
-        } else if (slackIndex === -1 && nativeIndex(popover) <= 0) {
-          claim(e); // step off the top of Chatwoot's list into the Slack rows
-          highlight(rows.length - 1);
-        }
-        return;
-      }
-      if (e.key === "ArrowDown" && slackIndex >= 0) {
+      var popover = openPopover();
+      if (!popover || !shown.length) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         claim(e);
-        if (slackIndex === rows.length - 1) highlight(-1); // hand the selection back
-        else highlight(slackIndex + 1);
-        return;
-      }
-      if ((e.key === "Enter" || e.key === "Tab") && slackIndex >= 0) {
+        highlight(selected + (e.key === "ArrowDown" ? 1 : -1));
+      } else if (e.key === "Enter" || e.key === "Tab") {
         claim(e);
-        pick(rows[slackIndex].getAttribute("data-emoji"), query);
-        return;
+        choose(shown[selected]);
       }
-      if (e.key === "Escape" && slackIndex >= 0) highlight(-1);
     },
     true,
   );
@@ -477,40 +570,134 @@
     if (e.stopImmediatePropagation) e.stopImmediatePropagation();
   }
 
+  // ---------------------------------------------------------------- message bubbles
+
+  var SHORTCODE = /:([a-z0-9_+'-]{1,100}):/gi;
+
+  /** Swap `:name:` for the image inside one rendered message. */
+  function renderBubble(node) {
+    node.setAttribute(DONE, "");
+    var wanted = [];
+    var text = node.textContent || "";
+    SHORTCODE.lastIndex = 0;
+    var found;
+    while ((found = SHORTCODE.exec(text))) wanted.push(found[1].toLowerCase());
+    if (!wanted.length) return;
+    // Names this message mentions, asked for in one request and remembered for the next.
+    lookup(wanted, function () {
+      if (node.isConnected) paintBubble(node);
+    });
+  }
+
+  function paintBubble(node) {
+    var walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+    var texts = [];
+    var text;
+    while ((text = walker.nextNode())) if (text.data.indexOf(":") !== -1) texts.push(text);
+
+    for (var i = 0; i < texts.length; i++) {
+      var parts = document.createDocumentFragment();
+      var at = 0;
+      var found = false;
+      var data = texts[i].data;
+      SHORTCODE.lastIndex = 0;
+      var match;
+      while ((match = SHORTCODE.exec(data))) {
+        var item = known[match[1].toLowerCase()];
+        if (!item) continue;
+        found = true;
+        if (match.index > at) parts.appendChild(document.createTextNode(data.slice(at, match.index)));
+        var img = document.createElement("img");
+        img.className = "cw-slack-inline";
+        img.src = item.url;
+        img.alt = match[0];
+        img.title = match[0];
+        img.loading = "lazy";
+        parts.appendChild(img);
+        at = match.index + match[0].length;
+      }
+      if (!found) continue;
+      if (at < data.length) parts.appendChild(document.createTextNode(data.slice(at)));
+      texts[i].parentNode.replaceChild(parts, texts[i]);
+    }
+  }
+
   // ---------------------------------------------------------------- wiring
 
-  document.addEventListener("input", function (e) {
-    var popover = findEmojiPopover();
-    if (popover && popover.contains(e.target)) decorate();
-  });
+  // One selector answers "is there anything to do?", so the observer stays cheap on a
+  // dashboard that mutates constantly. Everything handled is marked and never revisited.
+  var PENDING =
+    ".emoji-dialog:not([" + DONE + "]), [role='dialog']:not([" + DONE + "]), [data-popover-content]:not([" + DONE + "]), .prose-bubble:not([" + DONE + "])";
 
-  var style = document.createElement("style");
-  style.textContent = [
-    ".cw-slack-section{padding:0 8px 4px}",
-    ".cw-slack-title,.cw-slack-rows-title{margin:4px 2px;font-size:11px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;opacity:.6}",
-    ".cw-slack-grid{display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:2px;max-height:5.5rem;overflow-y:auto;scrollbar-width:none}",
-    ".cw-slack-btn{display:flex;align-items:center;justify-content:center;padding:3px;border:0;background:none;border-radius:8px;cursor:pointer;aspect-ratio:1}",
-    ".cw-slack-btn:hover{background:rgba(127,127,127,.18)}",
-    ".cw-slack-btn img{width:20px;height:20px;object-fit:contain}",
-    ".cw-slack-empty{margin:4px 2px 6px;font-size:12px;opacity:.6}",
-    ".cw-slack-rows{padding:0 0 4px;border-bottom:1px solid rgba(127,127,127,.2)}",
-    ".cw-slack-row{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;cursor:pointer;font-size:13px}",
-    ".cw-slack-row img{width:18px;height:18px;object-fit:contain}",
-    ".cw-slack-row-code{margin-inline-start:auto;opacity:.55;font-size:12px}",
-    ".cw-slack-row:hover,.cw-slack-row.is-active{background:rgba(127,127,127,.22)}",
-    '.cw-slack-owns-selection li[role="option"][aria-selected="true"]{background:transparent!important}',
-  ].join("");
-  document.head.appendChild(style);
+  var observer = null;
+  var scheduled = false;
+  var budget = { count: 0, since: 0 };
+
+  function refresh() {
+    if (!document.querySelector(PENDING)) return;
+    if (!spend()) return;
+    if (observer) observer.disconnect();
+    try {
+      var pending = document.querySelectorAll(PENDING);
+      for (var i = 0; i < pending.length; i++) {
+        var node = pending[i];
+        if (node.matches(".prose-bubble")) renderBubble(node);
+        else if (isEmojiPopover(node)) takeOverPopover(node);
+        else if (isEmojiDialog(node)) takeOverDialog(node);
+        else if (node.matches("[role='dialog'], [data-popover-content]")) node.setAttribute(DONE, "skip");
+      }
+    } finally {
+      if (observer) {
+        observer.takeRecords();
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+      }
+    }
+  }
+
+  /** If decorating ever runs away, stop watching rather than pinning the tab's main thread. */
+  function spend() {
+    var now = Date.now();
+    if (now - budget.since > 1000) {
+      budget.since = now;
+      budget.count = 0;
+    }
+    if (++budget.count <= 60) return true;
+    if (observer) observer.disconnect();
+    observer = null;
+    warn("decorating too often; stopped watching the DOM");
+    return false;
+  }
 
   observer = new MutationObserver(function () {
     if (scheduled) return; // coalesce a burst of Vue patches into one pass
     scheduled = true;
     requestAnimationFrame(function () {
       scheduled = false;
-      decorate();
+      refresh();
     });
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
-  load();
+  var style = document.createElement("style");
+  style.textContent = [
+    ".cw-slack-panel{height:15rem;overflow-y:auto;padding:0 8px 8px;scrollbar-width:none}",
+    ".cw-slack-panel::-webkit-scrollbar{display:none}",
+    ".cw-slack-heading{margin:6px 2px 2px;font-size:11px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;opacity:.6}",
+    ".cw-slack-grid{display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:2px}",
+    ".cw-slack-tile{display:flex;align-items:center;justify-content:center;padding:2px;border:0;background:none;border-radius:8px;cursor:pointer;aspect-ratio:1;font-size:20px;line-height:1}",
+    ".cw-slack-tile:hover{background:rgba(127,127,127,.18)}",
+    ".cw-slack-img{width:20px;height:20px;object-fit:contain}",
+    ".cw-slack-glyph{font-size:20px;line-height:1}",
+    ".cw-slack-note{margin:8px 2px;font-size:12px;opacity:.6}",
+    ".cw-slack-rows{margin:0;padding:0;list-style:none}",
+    ".cw-slack-row{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;cursor:pointer;font-size:13px}",
+    ".cw-slack-row .cw-slack-img,.cw-slack-row .cw-slack-glyph{width:18px;height:18px;font-size:16px;text-align:center}",
+    ".cw-slack-row-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+    ".cw-slack-row-code{margin-inline-start:auto;opacity:.55;font-size:12px}",
+    ".cw-slack-row:hover,.cw-slack-row.is-active{background:rgba(127,127,127,.22)}",
+    ".cw-slack-inline{display:inline-block;width:1.35em;height:1.35em;object-fit:contain;vertical-align:-0.3em}",
+  ].join("");
+  document.head.appendChild(style);
+
+  loadStandard();
 })();

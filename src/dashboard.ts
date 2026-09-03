@@ -4,7 +4,7 @@ import type { NextFunction, Request, Response, Router } from "express";
 import type { Config } from "./config.js";
 import type { AppContext } from "./context.js";
 import { log } from "./logger.js";
-import { EmojiCache, splitPrefix, type EmojiSnapshot } from "./slack/emoji.js";
+import { EmojiCache, lookupEmoji, searchEmoji, splitPrefix, type EmojiMap, type EmojiSnapshot } from "./slack/emoji.js";
 
 /**
  * Assets for Chatwoot's DASHBOARD_SCRIPTS hook: a browser script that teaches the agent
@@ -26,6 +26,32 @@ export function registerDashboardRoutes(router: Router, ctx: AppContext, cache: 
     res.type("application/javascript").set("Cache-Control", "public, max-age=300").sendFile(SCRIPT_FILE);
   });
 
+  // What the dashboard script actually calls: matches for what an agent typed, and the
+  // handful of names a rendered message mentions. Both are small enough to answer per
+  // keystroke, which the full list (megabytes at 60k emoji) never could be.
+  router.get("/dashboard/slack-emoji/search", (req: Request, res: Response, next: NextFunction) => {
+    allowOrigin(req, res, origins);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 40, 1), 200);
+    cache
+      .get()
+      .then((snapshot) => {
+        send(res, splitPrefix(searchEmoji(snapshot.emoji, String(req.query.q ?? ""), limit)), snapshot.fetchedAt);
+      })
+      .catch(next);
+  });
+
+  router.get("/dashboard/slack-emoji/lookup", (req: Request, res: Response, next: NextFunction) => {
+    allowOrigin(req, res, origins);
+    const names = String(req.query.names ?? "").split(",").map((n) => n.trim()).filter(Boolean).slice(0, 200);
+    cache
+      .get()
+      .then((snapshot) => {
+        send(res, splitPrefix(lookupEmoji(snapshot.emoji, names)), snapshot.fetchedAt);
+      })
+      .catch(next);
+  });
+
+  /** The whole list. Nothing in the dashboard needs it; kept for debugging and export. */
   router.get("/dashboard/slack-emoji.json", (req: Request, res: Response, next: NextFunction) => {
     allowOrigin(req, res, origins);
     cache
@@ -69,6 +95,15 @@ function render(snapshot: EmojiSnapshot): { json: string; gzip: Buffer; etag: st
   const json = JSON.stringify({ prefix, emoji, count, fetchedAt: new Date(snapshot.fetchedAt).toISOString() });
   rendered = { fetchedAt: snapshot.fetchedAt, json, gzip: gzipSync(json), etag: `W/"${snapshot.fetchedAt}-${count}"` };
   return rendered;
+}
+
+function send(res: Response, body: { prefix: string; emoji: EmojiMap }, fetchedAt: number): void {
+  res.set("Cache-Control", "public, max-age=300").json({
+    prefix: body.prefix,
+    emoji: body.emoji,
+    count: Object.keys(body.emoji).length,
+    fetchedAt: new Date(fetchedAt).toISOString(),
+  });
 }
 
 function slackError(err: unknown): string | undefined {

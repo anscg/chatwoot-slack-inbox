@@ -77,25 +77,67 @@ export class EmojiCache {
 }
 
 /**
- * Every URL in a workspace shares `https://emoji.slack-edge.com/<team>/`, which is most of
- * each entry, so it is sent once and the map holds what is left. Worth roughly half the
- * payload before gzip gets to it.
+ * Nearly every URL in a workspace shares `https://emoji.slack-edge.com/<team>/`, which is
+ * most of each entry, so it is sent once and each value holds only what is left. The prefix
+ * is the commonest root rather than one common to all: a single odd entry (Slack serves
+ * `simple_smile` from its own CDN) would otherwise cost everyone else the saving. Anything
+ * that does not start with the prefix keeps its absolute URL, which the client detects.
  */
 export function splitPrefix(emoji: EmojiMap): { prefix: string; emoji: EmojiMap } {
-  const urls = Object.values(emoji);
-  if (urls.length < 2) return { prefix: "", emoji };
-
-  let prefix = urls[0]!;
-  for (const url of urls) {
-    let i = 0;
-    while (i < prefix.length && i < url.length && prefix[i] === url[i]) i++;
-    prefix = prefix.slice(0, i);
-    if (!prefix) break;
+  const roots = new Map<string, number>();
+  for (const url of Object.values(emoji)) {
+    const root = url.split("/").slice(0, 4).join("/") + "/"; // scheme, host, team
+    roots.set(root, (roots.get(root) ?? 0) + 1);
   }
-  prefix = prefix.slice(0, prefix.lastIndexOf("/") + 1);
-  if (prefix.length < 20) return { prefix: "", emoji };
+  const [prefix = "", count = 0] = [...roots].sort((a, b) => b[1] - a[1])[0] ?? [];
+  if (prefix.length < 20 || count < 2) return { prefix: "", emoji };
 
   const trimmed: EmojiMap = {};
-  for (const name of Object.keys(emoji)) trimmed[name] = emoji[name]!.slice(prefix.length);
+  for (const name of Object.keys(emoji)) {
+    const url = emoji[name]!;
+    trimmed[name] = url.startsWith(prefix) ? url.slice(prefix.length) : url;
+  }
   return { prefix, emoji: trimmed };
+}
+
+/**
+ * A 60k-emoji workspace is megabytes of JSON, far too much to hand every dashboard tab, so
+ * the browser asks for matches instead of the list. Ranking: a name that starts with the
+ * query wins, then the earliest match, then the shortest name.
+ */
+export function searchEmoji(emoji: EmojiMap, query: string, limit: number): EmojiMap {
+  const q = query.toLowerCase().replace(/:/g, "").trim();
+  const out: EmojiMap = {};
+  if (!q) return out;
+
+  const hits: { name: string; at: number }[] = [];
+  for (const name of namesOf(emoji)) {
+    const at = name.indexOf(q);
+    if (at !== -1) hits.push({ name, at });
+  }
+  hits.sort((a, b) => a.at - b.at || a.name.length - b.name.length || (a.name < b.name ? -1 : 1));
+  for (const hit of hits.slice(0, limit)) out[hit.name] = emoji[hit.name]!;
+  return out;
+}
+
+/** Keys of a 60k-entry map, kept per snapshot so a keystroke does not rebuild the array. */
+const nameCache = new WeakMap<EmojiMap, string[]>();
+
+function namesOf(emoji: EmojiMap): string[] {
+  let names = nameCache.get(emoji);
+  if (!names) {
+    names = Object.keys(emoji);
+    nameCache.set(emoji, names);
+  }
+  return names;
+}
+
+/** The named emoji only — what a rendered message needs to turn `:name:` into an image. */
+export function lookupEmoji(emoji: EmojiMap, names: string[]): EmojiMap {
+  const out: EmojiMap = {};
+  for (const name of names) {
+    const url = emoji[name.toLowerCase()];
+    if (url) out[name.toLowerCase()] = url;
+  }
+  return out;
 }

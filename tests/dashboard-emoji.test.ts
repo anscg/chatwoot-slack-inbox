@@ -3,7 +3,7 @@ import express from "express";
 import { describe, expect, it, vi } from "vitest";
 import type { AppContext } from "../src/context.js";
 import { registerDashboardRoutes } from "../src/dashboard.js";
-import { EmojiCache, fetchWorkspaceEmoji, splitPrefix } from "../src/slack/emoji.js";
+import { EmojiCache, fetchWorkspaceEmoji, lookupEmoji, searchEmoji, splitPrefix } from "../src/slack/emoji.js";
 import { testConfig } from "./helpers.js";
 
 function slackWith(emoji: Record<string, string>, list = vi.fn(async () => ({ ok: true, emoji }))) {
@@ -83,6 +83,39 @@ describe("workspace emoji", () => {
     const mixed = { a: "https://a.example/1.png", b: "https://b.example/2.png" };
     expect(splitPrefix(mixed)).toEqual({ prefix: "", emoji: mixed });
   });
+
+  it("keeps the common prefix when one odd entry lives on another host", () => {
+    // Slack serves `simple_smile` from its own CDN; that must not cost the other 60k the saving.
+    const { prefix, emoji } = splitPrefix({
+      parrot: "https://emoji.slack-edge.com/T1/parrot/aa.gif",
+      yay: "https://emoji.slack-edge.com/T1/yay/bb.png",
+      simple_smile: "https://a.slack-edge.com/80588/img/simple_smile.png",
+    });
+    expect(prefix).toBe("https://emoji.slack-edge.com/T1/");
+    expect(emoji).toEqual({
+      parrot: "parrot/aa.gif",
+      yay: "yay/bb.png",
+      simple_smile: "https://a.slack-edge.com/80588/img/simple_smile.png",
+    });
+  });
+
+  it("ranks a search by where the query lands, then by name length", () => {
+    const emoji = {
+      parrot: "p.gif",
+      partyparrot: "pp.gif",
+      party: "pa.gif",
+      unrelated: "u.gif",
+    };
+    // All three match at index 0, so the shorter name comes first.
+    expect(Object.keys(searchEmoji(emoji, ":par:", 10))).toEqual(["party", "parrot", "partyparrot"]);
+    expect(Object.keys(searchEmoji(emoji, "par", 2))).toEqual(["party", "parrot"]);
+    expect(searchEmoji(emoji, "   ", 10)).toEqual({});
+  });
+
+  it("looks names up case-insensitively and skips the ones it does not have", () => {
+    const emoji = { parrot: "p.gif" };
+    expect(lookupEmoji(emoji, ["Parrot", "nope"])).toEqual({ parrot: "p.gif" });
+  });
 });
 
 describe("dashboard script routes", () => {
@@ -114,7 +147,33 @@ describe("dashboard script routes", () => {
     });
   });
 
-  it("gzips the list and answers a revalidation with 304", async () => {
+  it("answers a search with matches only, prefix factored out", async () => {
+    const slack = slackWith({
+      parrot: "https://emoji.slack-edge.com/T1/parrot/aa.gif",
+      party: "https://emoji.slack-edge.com/T1/party/bb.png",
+      unrelated: "https://emoji.slack-edge.com/T1/unrelated/cc.png",
+    });
+    await withServer(slack, async (base) => {
+      const res = await fetch(`${base}/dashboard/slack-emoji/search?q=par&limit=5`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        count: 2,
+        prefix: "https://emoji.slack-edge.com/T1/",
+        emoji: { parrot: "parrot/aa.gif", party: "party/bb.png" },
+      });
+    });
+  });
+
+  it("answers a lookup with just the names a message mentioned", async () => {
+    const slack = slackWith({ parrot: "https://emoji.slack-edge.com/T1/parrot/aa.gif", yay: "https://emoji.slack-edge.com/T1/yay/bb.png" });
+    await withServer(slack, async (base) => {
+      const res = await fetch(`${base}/dashboard/slack-emoji/lookup?names=parrot,nope`);
+      // One hit is not worth a prefix, so it comes back absolute; the client accepts either.
+      expect(await res.json()).toMatchObject({ count: 1, prefix: "", emoji: { parrot: "https://emoji.slack-edge.com/T1/parrot/aa.gif" } });
+    });
+  });
+
+  it("gzips the full list and answers a revalidation with 304", async () => {
     const slack = slackWith({ yay: "https://emoji.slack-edge.com/T1/yay/1.png" });
     await withServer(slack, async (base) => {
       const res = await fetch(`${base}/dashboard/slack-emoji.json`);
