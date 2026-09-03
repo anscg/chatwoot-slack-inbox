@@ -67,6 +67,12 @@ export interface Agent {
   hasChatwootToken: boolean;
   createdAt: string;
 }
+export interface ChatwootAgentSummary {
+  id: number;
+  name: string;
+  email: string | null;
+  accounts: number[];
+}
 export interface Thread {
   id: number;
   slackChannel: string;

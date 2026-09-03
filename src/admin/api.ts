@@ -299,6 +299,53 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
     }),
   );
 
+  /** Chatwoot agents across every bridged account, for manual linking. */
+  api.get(
+    "/chatwoot/agents",
+    wrap(async (_req, res) => {
+      res.json(await listChatwootAgents(ctx));
+    }),
+  );
+
+  /**
+   * Manually set (or clear) which Chatwoot agent a Slack user is, by id or by email match.
+   * For when the automatic email match at /link fails (different emails on each side).
+   */
+  api.put(
+    "/agents/:id/chatwoot-agent",
+    wrap(async (req, res) => {
+      const id = Number(req.params.id);
+      const input = z
+        .object({ chatwootAgentId: z.number().int().positive().nullable().optional(), email: z.string().trim().email().optional() })
+        .safeParse(req.body);
+      if (!input.success) return badRequest(res, zodMsg(input.error));
+      let agentId = input.data.chatwootAgentId;
+      let email: string | null | undefined;
+      if (input.data.email) {
+        const all = await listChatwootAgents(ctx);
+        const hit = all.find((a) => a.email?.toLowerCase() === input.data.email!.toLowerCase());
+        if (!hit) return badRequest(res, `No Chatwoot agent with email ${input.data.email} in any bridged account`);
+        agentId = hit.id;
+        email = hit.email;
+      } else if (agentId) {
+        const all = await listChatwootAgents(ctx);
+        const hit = all.find((a) => a.id === agentId);
+        if (!hit) return badRequest(res, `Chatwoot agent ${agentId} is not in any bridged account`);
+        email = hit.email;
+      } else if (agentId === undefined) {
+        return badRequest(res, "chatwootAgentId or email required");
+      }
+      const [row] = await db
+        .update(agents)
+        .set({ chatwootAgentId: agentId ?? null, ...(email !== undefined ? { email } : {}) })
+        .where(eq(agents.id, id))
+        .returning();
+      if (!row) return void res.status(404).json({ error: "not found" });
+      log.info("agent link set manually", { agentRow: id, chatwootAgentId: agentId, by: (req as Request & { admin: AdminSession }).admin.userId });
+      res.json(redactAgent(row));
+    }),
+  );
+
   api.put(
     "/agents/:id/chatwoot-token",
     wrap(async (req, res) => {
@@ -379,6 +426,37 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   });
 
   router.use("/admin/api", api);
+}
+
+export interface ChatwootAgentSummary {
+  id: number;
+  name: string;
+  email: string | null;
+  accounts: number[];
+}
+
+/** Union of agents across all enabled bridges' accounts (Chatwoot user ids are global per install). */
+export async function listChatwootAgents(ctx: AppContext): Promise<ChatwootAgentSummary[]> {
+  const byId = new Map<number, ChatwootAgentSummary>();
+  const seenAccounts = new Set<number>();
+  for (const bridge of ctx.bridges.all()) {
+    const acct = bridge.row.chatwootAccountId;
+    if (seenAccounts.has(acct)) continue;
+    seenAccounts.add(acct);
+    let list;
+    try {
+      list = await bridge.chatwoot.listAgents();
+    } catch (err) {
+      log.warn("listAgents failed", { bridge: bridge.row.name, error: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
+    for (const a of list) {
+      const cur = byId.get(a.id) ?? { id: a.id, name: a.name, email: a.email ?? null, accounts: [] };
+      cur.accounts.push(acct);
+      byId.set(a.id, cur);
+    }
+  }
+  return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** Does this token belong to a member of `accountId`, and does that account have an API inbox with this identifier? */

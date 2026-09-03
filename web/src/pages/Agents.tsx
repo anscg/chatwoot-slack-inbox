@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { api, type Agent, type Me } from "../api";
+import { api, type Agent, type ChatwootAgentSummary, type Me } from "../api";
 import { fmtDate, useResource } from "./common";
 
 export function Agents(_: { me: Me }) {
   const { data, error, reload } = useResource<Agent[]>("/agents");
+  const cwAgents = useResource<ChatwootAgentSummary[]>("/chatwoot/agents");
   const [newId, setNewId] = useState("");
   const [err, setErr] = useState<string | null>(null);
 
@@ -11,8 +12,8 @@ export function Agents(_: { me: Me }) {
     <div className="panel">
       <h2>Agents</h2>
       <p className="note">
-        Agents appear here after visiting <code>/link</code>. A Slack token lets Chatwoot replies post as them; a Chatwoot token lets their Slack replies be attributed to
-        them in Chatwoot. Paste each agent's Chatwoot access token (Profile settings → Access token) below.
+        Agents appear here after visiting <code>/link</code>, which matches them to a Chatwoot agent by email. If the emails differ, set the Chatwoot agent by hand
+        in the third column. A Slack token lets Chatwoot replies post as them; a Chatwoot token lets their Slack replies be attributed to them in Chatwoot.
       </p>
       {error && <p className="err">{error}</p>}
       {err && <p className="err">{err}</p>}
@@ -29,7 +30,7 @@ export function Agents(_: { me: Me }) {
         </thead>
         <tbody>
           {data?.map((a) => (
-            <AgentRow key={a.id} a={a} onChange={reload} onError={setErr} />
+            <AgentRow key={a.id} a={a} cwAgents={cwAgents.data ?? []} onChange={reload} onError={setErr} />
           ))}
           <tr>
             <td colSpan={5}>
@@ -59,9 +60,25 @@ export function Agents(_: { me: Me }) {
   );
 }
 
-function AgentRow({ a, onChange, onError }: { a: Agent; onChange: () => void; onError: (m: string | null) => void }) {
+function AgentRow({ a, cwAgents, onChange, onError }: { a: Agent; cwAgents: ChatwootAgentSummary[]; onChange: () => void; onError: (m: string | null) => void }) {
   const [token, setToken] = useState("");
   const [editing, setEditing] = useState(false);
+  const [linking, setLinking] = useState(false);
+  const [pick, setPick] = useState<string>(a.chatwootAgentId ? String(a.chatwootAgentId) : "");
+  const [email, setEmail] = useState("");
+  const matched = cwAgents.find((c) => c.id === a.chatwootAgentId);
+
+  async function saveLink(body: { chatwootAgentId?: number | null; email?: string }) {
+    try {
+      await api.put(`/agents/${a.id}/chatwoot-agent`, body);
+      onError(null);
+      setLinking(false);
+      setEmail("");
+      onChange();
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  }
   return (
     <tr>
       <td>
@@ -69,7 +86,55 @@ function AgentRow({ a, onChange, onError }: { a: Agent; onChange: () => void; on
         <div className="note">{fmtDate(a.createdAt)}</div>
       </td>
       <td>{a.email ?? <span className="muted">—</span>}</td>
-      <td>{a.chatwootAgentId ? <code>#{a.chatwootAgentId}</code> : <span className="pill warn">not matched</span>}</td>
+      <td>
+        {linking ? (
+          <span className="row" style={{ flexDirection: "column", alignItems: "stretch", gap: 6, maxWidth: 280 }}>
+            <select value={pick} onChange={(e) => setPick(e.target.value)}>
+              <option value="">Pick a Chatwoot agent…</option>
+              {cwAgents.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} {c.email ? `<${c.email}>` : ""} · acct {c.accounts.join(", ")}
+                </option>
+              ))}
+            </select>
+            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="…or match by Chatwoot email" />
+            <span className="row">
+              <button
+                className="small primary"
+                disabled={!pick && !email}
+                onClick={() => (email ? saveLink({ email }) : saveLink({ chatwootAgentId: Number(pick) }))}
+              >
+                Save
+              </button>
+              {a.chatwootAgentId && (
+                <button className="small" onClick={() => saveLink({ chatwootAgentId: null })}>
+                  Unlink
+                </button>
+              )}
+              <button className="small" onClick={() => setLinking(false)}>
+                Cancel
+              </button>
+            </span>
+          </span>
+        ) : a.chatwootAgentId ? (
+          <span className="row">
+            <span>
+              {matched?.name ?? <code>#{a.chatwootAgentId}</code>}
+              {matched?.email && <div className="note">{matched.email}</div>}
+            </span>
+            <button className="small" onClick={() => setLinking(true)}>
+              Change
+            </button>
+          </span>
+        ) : (
+          <span className="row">
+            <span className="pill warn">not matched</span>
+            <button className="small" onClick={() => setLinking(true)}>
+              Link
+            </button>
+          </span>
+        )}
+      </td>
       <td>{a.hasSlackToken ? <span className="pill ok">linked</span> : <span className="pill off">none</span>}</td>
       <td>
         {editing ? (

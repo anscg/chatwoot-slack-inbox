@@ -1,6 +1,7 @@
 import express from "express";
 import { describe, expect, it } from "vitest";
-import { requireAdmin } from "../src/admin/api.js";
+import { listChatwootAgents, requireAdmin } from "../src/admin/api.js";
+import { addBridge, makeContext } from "./helpers.js";
 import { ADMIN_COOKIE, Signer } from "../src/session.js";
 import { TEST_KEY } from "./helpers.js";
 
@@ -45,5 +46,23 @@ describe("admin session", () => {
     const signer = new Signer(TEST_KEY);
     expect(signer.verify(signer.sign({ a: 1 }, -1))).toBeNull();
     expect(signer.verify(signer.sign({ a: 1 }, 1000))).toMatchObject({ a: 1 });
+  });
+});
+
+describe("manual chatwoot agent linking", () => {
+  it("lists agents across bridged accounts once per account, deduped by user id", async () => {
+    const ctx = await makeContext();
+    ctx.chatwootMock.listAgents.mockResolvedValue([
+      { id: 7, name: "Sam", email: "sam@chatwoot.example" },
+      { id: 8, name: "Kai", email: "KAI@chatwoot.example" },
+    ]);
+    await addBridge(ctx, { name: "second", channel: "C_TWO", accountId: 2 });
+    await addBridge(ctx, { name: "same-account", channel: "C_THREE", accountId: 1 });
+    const list = await listChatwootAgents(ctx);
+    expect(list.map((a) => [a.id, a.accounts])).toEqual([
+      [8, [1, 2]],
+      [7, [1, 2]],
+    ]);
+    expect(ctx.chatwootMock.listAgents).toHaveBeenCalledTimes(2); // accounts 1 and 2, not 3 bridges
   });
 });
