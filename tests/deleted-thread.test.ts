@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { relayChatwootMessage, type ChatwootMessageJob } from "../src/chatwoot/webhook.js";
+import { applyChatwootStatus, relayChatwootMessage, type ChatwootMessageJob } from "../src/chatwoot/webhook.js";
 import { threads } from "../src/db/schema.js";
 import { acceptSlackMessage, JOB_SLACK_MESSAGE, JOB_THREAD_DELETED, noteThreadDeleted, relaySlackMessage, type IncomingSlackMessage } from "../src/slack/events.js";
 import { flush, makeContext, type TestContext } from "./helpers.js";
@@ -56,6 +56,24 @@ describe("a deleted question", () => {
       0,
     );
     expect(ctx.slackMock.chat.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when the conversation is later resolved or reopened in Chatwoot", async () => {
+    const ctx = await setup();
+    await acceptSlackMessage(ctx, "Ev1", post());
+    await flush();
+    await acceptSlackMessage(ctx, "Ev2", deletion());
+    await flush();
+    ctx.slackMock.chat.postMessage.mockClear();
+
+    await applyChatwootStatus(ctx, { conversationId: 42, status: "resolved", accountId: 1 });
+    await applyChatwootStatus(ctx, { conversationId: 42, status: "open", accountId: 1 });
+
+    // No notice, no emoji stamp on a message that no longer exists, no attempt to edit the welcome.
+    expect(ctx.slackMock.chat.postMessage).not.toHaveBeenCalled();
+    expect(ctx.slackMock.reactions.add).not.toHaveBeenCalled();
+    expect(ctx.slackMock.reactions.remove).not.toHaveBeenCalled();
+    expect(ctx.slackMock.chat.update).not.toHaveBeenCalled();
   });
 
   it("skips the welcome when the question vanished mid-relay, but still records the question in Chatwoot", async () => {
