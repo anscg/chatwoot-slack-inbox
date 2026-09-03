@@ -3,7 +3,7 @@ export function bridgeManifest(opts: { name: string; slug: string; publicUrl: st
   const display = opts.name.slice(0, 35);
   return `display_information:
   name: ${yaml(display)}
-  description: ${yaml(`Support inbox bridge for ${opts.name} (Chatwoot). Unofficial.`)}
+  description: ${yaml(`Support for ${opts.name}.`)}
   background_color: "#1f93ff"
 features:
   bot_user:
