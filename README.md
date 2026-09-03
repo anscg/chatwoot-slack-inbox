@@ -53,7 +53,7 @@ Redeploys are safe: migrations are idempotent, bridges/agents live in Postgres, 
 
 ## Agents linking their accounts
 
-Every agent should visit `${PUBLIC_URL}/link` once. It runs a Slack OAuth flow (user scope `chat:write`) and stores the user token encrypted; replies made in Chatwoot are then posted to Slack **from the agent's own Slack account** via `chat.postMessage`. Their Slack email is matched against the agents of every bridged Chatwoot account to find their Chatwoot user.
+Every agent should visit `${PUBLIC_URL}/link` once. It runs a Slack OAuth flow (user scopes `chat:write`, `files:write`) and stores the user token encrypted; replies made in Chatwoot are then posted to Slack **from the agent's own Slack account** via `chat.postMessage`. Their Slack email is matched against the agents of every bridged Chatwoot account to find their Chatwoot user.
 
 If an agent replies before linking, the message still reaches Slack (posted by the bridge's bot with the agent's name and avatar) and the agent gets a private note in the conversation pointing them to `/link`.
 
@@ -64,7 +64,7 @@ For the other direction — Slack replies attributed to them in Chatwoot — an 
 - Slack events are acknowledged immediately; all Chatwoot/Slack calls happen afterwards. Duplicate deliveries are dropped via `event_id` (24h TTL).
 - Every relayed message is recorded (`relayed` table) so nothing echoes back. Messages the bridge posts to Slack also carry a metadata marker.
 - Any failed outbound call is queued in Postgres and retried with exponential backoff (30s → 1h, 8 attempts), including honoring Slack `Retry-After`. Posts are throttled to ~1/sec/channel.
-- Slack attachments are downloaded with the bot token and re-uploaded to Chatwoot (≤ 40 MB). Chatwoot attachments are posted to Slack as links.
+- Attachments go both ways as real files (≤ 40 MB): Slack files are downloaded with the bridge bot and attached to the Chatwoot message; Chatwoot attachments are uploaded into the Slack thread with `files.uploadV2`, as the agent when their linked token has `files:write`, else by the bot with the agent named. If a download or upload fails the file is posted as a link instead.
 - Replies in threads that predate the bridge are ignored. Replies from someone other than the original poster are prefixed `**[Not OP] Name:**`.
 - Chatwoot reopens resolved conversations itself when the contact writes again; the bridge does nothing special.
 - Contacts carry the Slack display name and avatar; both are refreshed on every new thread. Chatwoot also looks up Gravatar for contacts with an email, so on a self-hosted Chatwoot set `DISABLE_GRAVATAR=true` if you want Slack avatars to be the only source.

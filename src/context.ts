@@ -12,4 +12,6 @@ export interface AppContext {
   hub: WebClient;
   bridges: BridgeRegistry;
   retry: RetryQueue;
+  /** Used to download Chatwoot attachments; overridable in tests. Defaults to global fetch. */
+  fetch?: typeof fetch;
 }

@@ -115,6 +115,86 @@ export async function postToSlackThread(ctx: AppContext, bridge: Bridge, args: P
   });
 }
 
+export interface UploadFile {
+  data: Buffer;
+  filename: string;
+  title?: string;
+}
+
+export interface UploadArgs {
+  channel: string;
+  threadTs: string;
+  /** Posted as the upload's initial comment (may be empty). */
+  text: string;
+  identity: PostIdentity;
+  files: UploadFile[];
+  chatwootMessageId: number;
+}
+
+export class SlackUploadUnavailable extends Error {}
+
+/**
+ * Upload files into a thread with `files.uploadV2`, as the agent when their user token has
+ * `files:write`, otherwise as the bot (named in the comment, since uploads can't be customized).
+ * Throws SlackUploadUnavailable when neither can upload, so the caller can fall back to links.
+ * Returns the Slack file ids (for echo detection) and the share message ts when Slack reports it.
+ */
+export async function uploadToSlackThread(ctx: AppContext, bridge: Bridge, args: UploadArgs): Promise<{ fileIds: string[]; ts?: string }> {
+  const uploads = args.files.map((f) => ({ file: f.data, filename: f.filename, title: f.title ?? f.filename }));
+  const run = async (client: WebClient, comment: string) => {
+    const res = (await client.files.uploadV2({
+      channel_id: args.channel,
+      thread_ts: args.threadTs,
+      ...(comment ? { initial_comment: comment } : {}),
+      file_uploads: uploads,
+    })) as WebAPICallResult & { files?: { files?: { id?: string; shares?: unknown }[] }[] };
+    const fileIds = (res.files ?? []).flatMap((r) => r.files ?? []).map((f) => f.id).filter((id): id is string => Boolean(id));
+    return { fileIds, ts: await shareTs(client, fileIds[0], args.channel) };
+  };
+
+  return throttle.run(args.channel, async () => {
+    if (args.identity.kind === "user") {
+      const id = args.identity;
+      try {
+        return await run(createUserClient(id.token), args.text);
+      } catch (err) {
+        if (isAuthError(err)) {
+          log.warn("slack user token rejected; unlinking and uploading as bot", { slackUserId: id.slackUserId, error: (err as Error).message });
+          await ctx.db.update(agents).set({ slackUserTokenEnc: null }).where(eq(agents.slackUserId, id.slackUserId));
+        } else if (isScopeError(err)) {
+          log.warn("agent's slack token lacks files:write; uploading as bot (they should re-run /link)", { slackUserId: id.slackUserId });
+        } else {
+          throw err;
+        }
+      }
+    }
+    const who = args.identity.kind === "bot" && args.identity.username ? `*${args.identity.username}:*` : "";
+    const comment = [who, args.text].filter(Boolean).join(args.text.includes("\n") ? "\n" : " ");
+    try {
+      return await run(bridge.slack, comment);
+    } catch (err) {
+      if (isScopeError(err)) throw new SlackUploadUnavailable(`bridge bot lacks files:write: ${(err as Error).message}`);
+      throw err;
+    }
+  });
+}
+
+async function shareTs(client: WebClient, fileId: string | undefined, channel: string): Promise<string | undefined> {
+  if (!fileId) return undefined;
+  try {
+    const info = (await client.files.info({ file: fileId })) as { file?: { shares?: { public?: Record<string, { ts?: string }[]>; private?: Record<string, { ts?: string }[]> } } };
+    const shares = info.file?.shares;
+    return shares?.public?.[channel]?.[0]?.ts ?? shares?.private?.[channel]?.[0]?.ts;
+  } catch {
+    return undefined;
+  }
+}
+
+function isScopeError(err: unknown): boolean {
+  const e = err as { code?: string; data?: { error?: string } };
+  return e?.code === ErrorCode.PlatformError && ["missing_scope", "not_allowed_token_type", "no_permission"].includes(e.data?.error ?? "");
+}
+
 function tsOf(res: WebAPICallResult): string {
   const ts = (res as { ts?: string }).ts;
   if (!ts) throw new Error("chat.postMessage returned no ts");

@@ -19,6 +19,7 @@ oauth_config:
       - reactions:read
       - reactions:write
       - files:read
+      - files:write
       - users:read
       - users:read.email
 settings:
@@ -67,6 +68,7 @@ oauth_config:
   scopes:
     user:
       - chat:write
+      - files:write
       - openid
       - email
       - profile

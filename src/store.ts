@@ -1,6 +1,6 @@
-import { and, eq, lt } from "drizzle-orm";
+import { and, eq, inArray, lt } from "drizzle-orm";
 import type { Db } from "./db/client.js";
-import { agents, relayed, seenEvents, threads, type Agent, type Thread } from "./db/schema.js";
+import { agents, relayed, relayedFiles, seenEvents, threads, type Agent, type Thread } from "./db/schema.js";
 
 export const SEEN_EVENT_TTL_MS = 24 * 60 * 60_000;
 
@@ -21,6 +21,21 @@ export async function isRelayedSlack(db: Db, channel: string, ts: string): Promi
     .where(and(eq(relayed.slackChannel, channel), eq(relayed.slackTs, ts)))
     .limit(1);
   return rows.length > 0;
+}
+
+export async function recordRelayedFiles(db: Db, slackFileIds: string[], chatwootMessageId: number): Promise<void> {
+  if (slackFileIds.length === 0) return;
+  await db
+    .insert(relayedFiles)
+    .values(slackFileIds.map((slackFileId) => ({ slackFileId, chatwootMessageId })))
+    .onConflictDoNothing();
+}
+
+/** True when every file id given was uploaded by the bridge (i.e. the message is our own echo). */
+export async function allFilesRelayed(db: Db, slackFileIds: string[]): Promise<boolean> {
+  if (slackFileIds.length === 0) return false;
+  const rows = await db.select({ id: relayedFiles.slackFileId }).from(relayedFiles).where(inArray(relayedFiles.slackFileId, slackFileIds));
+  return rows.length === slackFileIds.length;
 }
 
 export async function isRelayedChatwoot(db: Db, chatwootMessageId: number): Promise<boolean> {

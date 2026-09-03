@@ -3,9 +3,37 @@ import type { Request, Response, Router } from "express";
 import type { AppContext } from "../context.js";
 import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
-import { postToSlackThread, resolvePostIdentity, type ChatwootSenderRef } from "../slack/post.js";
+import { postToSlackThread, resolvePostIdentity, SlackUploadUnavailable, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
 import { chatwootToSlackText } from "../slack/text.js";
-import { findThreadByConversation, isRelayedChatwoot, recordRelayed } from "../store.js";
+import { findThreadByConversation, isRelayedChatwoot, recordRelayed, recordRelayedFiles } from "../store.js";
+
+const MAX_ATTACHMENT_BYTES = 40 * 1024 * 1024;
+
+/** Download Chatwoot attachments so they can be re-uploaded to Slack. Failures fall back to links. */
+async function downloadAttachments(fetchFn: typeof fetch, attachments: ChatwootMessageJob["attachments"]): Promise<{ files: UploadFile[]; failed: ChatwootMessageJob["attachments"] }> {
+  const files: UploadFile[] = [];
+  const failed: ChatwootMessageJob["attachments"] = [];
+  for (const a of attachments) {
+    try {
+      const res = await fetchFn(a.url, { signal: AbortSignal.timeout(20_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length === 0 || buf.length > MAX_ATTACHMENT_BYTES) throw new Error(`size ${buf.length}`);
+      files.push({ data: buf, filename: filenameFor(a.url, res.headers.get("content-type"), a.type) });
+    } catch (err) {
+      log.warn("could not download chatwoot attachment; will link instead", { url: a.url, error: err instanceof Error ? err.message : String(err) });
+      failed.push(a);
+    }
+  }
+  return { files, failed };
+}
+
+function filenameFor(url: string, contentType: string | null, type: string): string {
+  const fromUrl = decodeURIComponent(new URL(url, "https://x").pathname.split("/").pop() ?? "");
+  if (fromUrl && /\.[a-z0-9]{1,5}$/i.test(fromUrl)) return fromUrl;
+  const ext = contentType?.split("/")[1]?.split(";")[0]?.replace("jpeg", "jpg");
+  return `${type || "file"}${ext ? `.${ext}` : ""}`;
+}
 
 export const JOB_CHATWOOT_MESSAGE = "chatwoot_message";
 
@@ -71,19 +99,53 @@ export async function relayChatwootMessage(ctx: AppContext, job: ChatwootMessage
   if (!bridge) throw new PermanentError(`no enabled bridge for channel ${thread.slackChannel}`);
 
   let text = chatwootToSlackText(job.content);
+  const identity = await resolvePostIdentity(ctx, job.sender);
+
+  // Attachments: download from Chatwoot and upload into the thread. Anything that can't be
+  // downloaded or uploaded is appended as a link so nothing is lost.
+  let linkable = job.attachments;
+  let ts: string | undefined;
+  let uploaded = false;
   if (job.attachments.length) {
-    const links = job.attachments.map((a, i) => `<${a.url}|${a.type} ${i + 1}>`).join("  ");
+    const { files, failed } = await downloadAttachments(ctx.fetch ?? fetch, job.attachments);
+    linkable = failed;
+    if (files.length) {
+      try {
+        const up = await uploadToSlackThread(ctx, bridge, {
+          channel: thread.slackChannel,
+          threadTs: thread.slackThreadTs,
+          text: failed.length ? text : text, // links for failures are posted below if needed
+          identity,
+          files,
+          chatwootMessageId: job.messageId,
+        });
+        await recordRelayedFiles(ctx.db, up.fileIds, job.messageId);
+        ts = up.ts ?? `upload:${up.fileIds[0] ?? job.messageId}`;
+        uploaded = true;
+        text = ""; // already sent as the upload's comment
+      } catch (err) {
+        if (!(err instanceof SlackUploadUnavailable)) throw err;
+        log.warn("slack upload unavailable; posting links", { bridge: bridge.row.name, error: err.message });
+        linkable = job.attachments;
+      }
+    }
+  }
+  if (linkable.length) {
+    const links = linkable.map((a, i) => `<${a.url}|${a.type} ${i + 1}>`).join("  ");
     text = text.trim() ? `${text}\n${links}` : links;
   }
-  const identity = await resolvePostIdentity(ctx, job.sender);
-  const ts = await postToSlackThread(ctx, bridge, {
-    channel: thread.slackChannel,
-    threadTs: thread.slackThreadTs,
-    text,
-    identity,
-    chatwootMessageId: job.messageId,
-  });
+  if (text.trim()) {
+    ts = await postToSlackThread(ctx, bridge, {
+      channel: thread.slackChannel,
+      threadTs: thread.slackThreadTs,
+      text,
+      identity,
+      chatwootMessageId: job.messageId,
+    });
+  }
+  if (!ts) return; // nothing to send (shouldn't happen: classifyWebhook drops empty messages)
   await recordRelayed(ctx.db, { slackChannel: thread.slackChannel, slackTs: ts, chatwootMessageId: job.messageId, direction: "chatwoot_to_slack" });
+  if (uploaded) log.debug("uploaded chatwoot attachments to slack", { conversationId: job.conversationId, count: job.attachments.length - linkable.length });
   log.info("relayed chatwoot message to slack", { bridge: bridge.row.name, conversationId: job.conversationId, as: identity.kind });
 
   // Agents are expected to post as themselves. If this one hasn't linked Slack yet, tell them (privately, once).

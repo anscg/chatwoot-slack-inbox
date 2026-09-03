@@ -98,6 +98,16 @@ export const relayed = pgTable(
 );
 
 /** Failed outbound calls awaiting retry with exponential backoff. */
+/**
+ * Slack file IDs the bridge itself uploaded (Chatwoot -> Slack). File-share messages made with a
+ * user token carry no bot_id or metadata, so this is how we recognise them when they echo back.
+ */
+export const relayedFiles = pgTable("relayed_files", {
+  slackFileId: text("slack_file_id").primaryKey(),
+  chatwootMessageId: integer("chatwoot_message_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const retries = pgTable(
   "retries",
   {

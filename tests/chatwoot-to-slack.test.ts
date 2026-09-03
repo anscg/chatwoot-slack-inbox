@@ -161,6 +161,80 @@ describe("webhook route", () => {
   });
 });
 
+describe("attachments (Chatwoot -> Slack)", () => {
+  const png = Buffer.from("89504e470d0a1a0a", "hex");
+  const fakeFetch = vi.fn(async (url: string | URL | Request) => {
+    if (String(url).endsWith("/broken.png")) return new Response("nope", { status: 404 });
+    return new Response(png, { status: 200, headers: { "content-type": "image/png" } });
+  }) as unknown as typeof fetch;
+
+  it("uploads the image into the thread as the agent, with the text as the comment, and records the file id", async () => {
+    const ctx = await setup();
+    ctx.fetch = fakeFetch;
+    await upsertAgent(ctx.db, { slackUserId: "U_AGENT", chatwootAgentId: 7, slackUserTokenEnc: encryptToken("xoxp-agent", TEST_KEY) });
+    const userUpload = vi.fn(async () => ({ ok: true, files: [{ files: [{ id: "F_USER1" }] }] }));
+    const userInfo = vi.fn(async () => ({ ok: true, file: { shares: { public: { C_HELP: [{ ts: "1700000000.000800" }] } } } }));
+    setUserClientFactory(() => ({ files: { uploadV2: userUpload, info: userInfo }, chat: { postMessage: vi.fn() } }) as never);
+
+    await relayChatwootMessage(ctx, job({ content: "here you go", attachments: [{ url: "https://cw.test/rails/active_storage/blobs/abc/screenshot.png", type: "image" }] }), 0);
+
+    expect(userUpload).toHaveBeenCalledTimes(1);
+    const args = userUpload.mock.calls[0]![0] as Record<string, unknown>;
+    expect(args).toMatchObject({ channel_id: "C_HELP", thread_ts: PARENT, initial_comment: "here you go" });
+    expect((args.file_uploads as { filename: string; file: Buffer }[])[0]).toMatchObject({ filename: "screenshot.png" });
+    expect(ctx.slackMock.chat.postMessage).not.toHaveBeenCalled(); // no separate text message
+    expect(ctx.slackMock.files.uploadV2).not.toHaveBeenCalled(); // not the bot
+    expect(await ctx.db.select().from(relayed)).toMatchObject([{ slackTs: "1700000000.000800", chatwootMessageId: 500 }]);
+
+    // The upload echoes back as a plain user message carrying our file id -> ignored.
+    const r = await acceptSlackMessage(ctx, "EvEcho", {
+      type: "message",
+      subtype: "file_share",
+      channel: "C_HELP",
+      ts: "1700000000.000800",
+      thread_ts: PARENT,
+      user: "U_AGENT",
+      text: "here you go",
+      files: [{ id: "F_USER1", name: "screenshot.png", mimetype: "image/png", size: 8 }],
+    });
+    expect(r).toBe("already relayed");
+    const r2 = await acceptSlackMessage(ctx, "EvEcho2", { type: "message", subtype: "file_share", channel: "C_HELP", ts: "1700000000.000801", thread_ts: PARENT, user: "U_AGENT", text: "", files: [{ id: "F_USER1", name: "x", mimetype: "image/png", size: 8 }] });
+    expect(r2).toBe("bridge-uploaded files");
+  });
+
+  it("falls back to the bot upload (naming the agent) when the user token lacks files:write", async () => {
+    const ctx = await setup();
+    ctx.fetch = fakeFetch;
+    await upsertAgent(ctx.db, { slackUserId: "U_AGENT", chatwootAgentId: 7, slackUserTokenEnc: encryptToken("xoxp-agent", TEST_KEY) });
+    setUserClientFactory(
+      () =>
+        ({
+          files: {
+            uploadV2: vi.fn(async () => {
+              throw Object.assign(new Error("missing_scope"), { code: "slack_webapi_platform_error", data: { error: "missing_scope" } });
+            }),
+          },
+        }) as never,
+    );
+    await relayChatwootMessage(ctx, job({ content: "", attachments: [{ url: "https://cw.test/a.png", type: "image" }] }), 0);
+    expect(ctx.slackMock.files.uploadV2).toHaveBeenCalledTimes(1);
+    // Token kept: missing scope is not an auth failure.
+    expect((await ctx.db.select().from(agents))[0]!.slackUserTokenEnc).not.toBeNull();
+  });
+
+  it("posts links when a download fails or the bot cannot upload", async () => {
+    const ctx = await setup();
+    ctx.fetch = fakeFetch;
+    await relayChatwootMessage(ctx, job({ content: "see", attachments: [{ url: "https://cw.test/broken.png", type: "image" }] }), 0);
+    expect(ctx.slackMock.files.uploadV2).not.toHaveBeenCalled();
+    expect((ctx.slackMock.chat.postMessage.mock.calls[0]![0] as { text: string }).text).toBe("see\n<https://cw.test/broken.png|image 1>");
+
+    ctx.slackMock.files.uploadV2.mockRejectedValueOnce(Object.assign(new Error("missing_scope"), { code: "slack_webapi_platform_error", data: { error: "missing_scope" } }));
+    await relayChatwootMessage(ctx, job({ messageId: 501, content: "", attachments: [{ url: "https://cw.test/ok.png", type: "image" }] }), 0);
+    expect((ctx.slackMock.chat.postMessage.mock.calls[1]![0] as { text: string }).text).toBe("<https://cw.test/ok.png|image 1>");
+  });
+});
+
 describe("dead user token", () => {
   it("falls back to the bot and unlinks the Slack token", async () => {
     const ctx = await setup();

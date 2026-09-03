@@ -11,7 +11,7 @@ function msg(over: Partial<IncomingSlackMessage> = {}): IncomingSlackMessage {
 
 async function setup() {
   const ctx = await makeContext();
-  ctx.retry.register(JOB_SLACK_MESSAGE, (p) => relaySlackMessage(ctx, p as never));
+  ctx.retry.register(JOB_SLACK_MESSAGE, (p) => relaySlackMessage(ctx, p as never, 0));
   return ctx;
 }
 

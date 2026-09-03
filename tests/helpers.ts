@@ -62,10 +62,15 @@ export function mockChatwoot(): MockChatwoot {
 export interface MockSlack {
   users: { info: ReturnType<typeof vi.fn> };
   chat: { postMessage: ReturnType<typeof vi.fn> };
+  files: { uploadV2: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
 }
 
 export function mockSlack(): MockSlack {
   return {
+    files: {
+      uploadV2: vi.fn(async () => ({ ok: true, files: [{ files: [{ id: "F_BOT1" }] }] })),
+      info: vi.fn(async () => ({ ok: true, file: { shares: { public: { C_HELP: [{ ts: "1700000000.000700" }] } } } })),
+    },
     users: {
       info: vi.fn(async ({ user }: { user: string }) => ({
         ok: true,

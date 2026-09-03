@@ -6,7 +6,7 @@ import { decryptToken } from "../crypto.js";
 import type { Agent, Thread } from "../db/schema.js";
 import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
-import { findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, recordRelayed } from "../store.js";
+import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, recordRelayed } from "../store.js";
 import { downloadSlackFiles, type SlackFileRef } from "./files.js";
 import { BRIDGE_METADATA_EVENT } from "./post.js";
 import { slackToChatwootText } from "./text.js";
@@ -70,6 +70,7 @@ export async function acceptSlackMessage(ctx: AppContext, eventId: string, msg: 
   if (!msg.user) return "no user";
   if (!(await markEventSeen(ctx.db, eventId))) return "duplicate event";
   if (await isRelayedSlack(ctx.db, msg.channel, msg.ts)) return "already relayed";
+  if (msg.files?.length && (await allFilesRelayed(ctx.db, msg.files.map((f) => f.id)))) return "bridge-uploaded files";
 
   const job: SlackMessageJob = { channel: msg.channel, ts: msg.ts, user: msg.user, text: msg.text ?? "" };
   if (msg.thread_ts) job.thread_ts = msg.thread_ts;
@@ -128,13 +129,21 @@ function permanentIf4xx(err: unknown): never {
   throw err;
 }
 
+/**
+ * A file the bridge uploaded with an agent's user token shows up as a normal user message; the
+ * relayed_files row is written right after the upload, so wait briefly before deciding.
+ */
+export const SLACK_ECHO_GRACE_MS = 1500;
+
 /** Relay one Slack message into Chatwoot. Idempotent: safe to run again from the retry queue. */
-export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob): Promise<void> {
+export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, graceMs = SLACK_ECHO_GRACE_MS): Promise<void> {
   const { db, hub } = ctx;
   const bridge = ctx.bridges.forChannel(job.channel);
   if (!bridge) throw new PermanentError(`no bridge for channel ${job.channel}`);
   const { chatwoot } = bridge;
+  if (job.files?.length && graceMs > 0) await new Promise((r) => setTimeout(r, graceMs));
   if (await isRelayedSlack(db, job.channel, job.ts)) return;
+  if (job.files?.length && (await allFilesRelayed(db, job.files.map((f) => f.id)))) return;
 
   const isReply = Boolean(job.thread_ts && job.thread_ts !== job.ts);
   const author = await getSlackProfile(hub, job.user);

@@ -16,6 +16,7 @@ oauth_config:
   scopes:
     user:
       - chat:write
+      - files:write
       - openid
       - email
       - profile

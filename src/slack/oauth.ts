@@ -45,7 +45,7 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
   router.get("/link", (_req: Request, res: Response) => {
     const url = new URL("https://slack.com/oauth/v2/authorize");
     url.searchParams.set("client_id", config.SLACK_CLIENT_ID);
-    url.searchParams.set("user_scope", "chat:write");
+    url.searchParams.set("user_scope", "chat:write,files:write");
     url.searchParams.set("redirect_uri", linkRedirect);
     url.searchParams.set("state", signer.sign({ purpose: "link" }, STATE_TTL_MS));
     res.redirect(url.toString());
