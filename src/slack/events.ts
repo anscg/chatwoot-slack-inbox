@@ -2,6 +2,7 @@ import type { App } from "@slack/bolt";
 import type { Bridge } from "../bridges.js";
 import { ChatwootHttpError } from "../chatwoot/client.js";
 import type { AppContext } from "../context.js";
+import { describeSlackRequest, recordTraffic } from "../diagnostics.js";
 import { decryptToken } from "../crypto.js";
 import type { Agent, Thread } from "../db/schema.js";
 import { log } from "../logger.js";
@@ -331,7 +332,16 @@ export function registerSlackJobs(ctx: AppContext): void {
 }
 
 /** Attach listeners to one bridge's Bolt app. Events are still validated against the channel mapping. */
-export function registerSlackEvents(app: App, ctx: AppContext): void {
+export function registerSlackEvents(app: App, ctx: AppContext, bridgeId: number): void {
+  // Record everything Slack sends this bridge, before any filtering, so the panel can show whether
+  // an event arrived at all. This is the difference between "Slack isn't sending it" and "we
+  // decided to ignore it".
+  app.use(async ({ body, next }) => {
+    const { kind, detail } = describeSlackRequest(body);
+    recordTraffic(bridgeId, kind, detail);
+    await next();
+  });
+
   app.event("message", async ({ event, body }) => {
     const eventId = (body as { event_id?: string }).event_id ?? `${event.channel}:${(event as { ts: string }).ts}`;
     const reason = await acceptSlackMessage(ctx, eventId, event as unknown as IncomingSlackMessage);
@@ -369,6 +379,7 @@ export function registerSlackEvents(app: App, ctx: AppContext): void {
     const reason = await acceptSlackReaction(ctx, eventId, ev);
     // Both outcomes at info level: "did the reaction reach us, and what did we decide" must be
     // answerable from the logs alone.
+    recordTraffic(bridgeId, "decision", `:${ev.reaction}: -> ${reason ?? "accepted"}`);
     if (reason) log.info("ignoring slack reaction", { reason, user: ev.user, reaction: ev.reaction, ts: ev.item?.ts, eventId });
     else log.info("accepted slack reaction", { user: ev.user, reaction: ev.reaction, ts: ev.item?.ts, eventId });
   });

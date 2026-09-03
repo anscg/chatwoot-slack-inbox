@@ -122,6 +122,7 @@ export interface BridgeCheck {
     error?: string;
   };
   chatwoot?: { ok?: boolean; accountId?: number; agents?: number; error?: string };
+  traffic: { at: string; kind: string; detail: string }[];
 }
 export interface SlackIntrospection {
   bot: { userId?: string; botId?: string; name?: string; team?: string };

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { defaultAuthTest } from "../bridges.js";
 import { ChatwootClient, ChatwootHttpError } from "../chatwoot/client.js";
 import type { AppContext } from "../context.js";
+import { recentTraffic } from "../diagnostics.js";
 import { encryptToken } from "../crypto.js";
 import { agents, bridges, relayed, retries, threads } from "../db/schema.js";
 import { log } from "../logger.js";
@@ -295,6 +296,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
         .from(threads)
         .where(eq(threads.slackChannel, row.slackChannel));
       out.threads = threadCount;
+      out.traffic = recentTraffic(id);
 
       if (bridge) {
         try {

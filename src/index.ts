@@ -39,7 +39,7 @@ async function main(): Promise<void> {
   const bridges = new BridgeRegistry(db, {
     chatwootBaseUrl: config.CHATWOOT_BASE_URL,
     encryptionKey: config.TOKEN_ENCRYPTION_KEY,
-    onBoltApp: (app) => registerSlackEvents(app, ctx),
+    onBoltApp: (app, bridgeId) => registerSlackEvents(app, ctx, bridgeId),
   });
   ctx.bridges = bridges;
   await bridges.reload();

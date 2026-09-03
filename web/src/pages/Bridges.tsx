@@ -233,6 +233,36 @@ function CheckPanel({ check, onClose }: { check: BridgeCheck | "loading"; onClos
           <Row ok={b.resolveMessage && b.reopenMessage} label="Resolved / reopened notices" detail={`${b.resolveMessage ? "resolved set" : "resolved off"}, ${b.reopenMessage ? "reopened set" : "reopened off"}`} />
         </tbody>
       </table>
+      <h3 className="step">Slack traffic received since the last restart</h3>
+      {check.traffic.length === 0 ? (
+        <p className="err">
+          Nothing at all. Slack is not reaching <code>{check.eventsUrl}</code>: check the Request URL under Event Subscriptions on this bridge's Slack app.
+        </p>
+      ) : (
+        <>
+          {!check.traffic.some((t) => t.kind === "event:reaction_added") && (
+            <p className="err">
+              No <code>reaction_added</code> event has arrived. If you have reacted since the last restart, that event is not subscribed: add it under Event
+              Subscriptions → Subscribe to bot events on this bridge's Slack app, then reinstall.
+            </p>
+          )}
+          <table>
+            <tbody>
+              {check.traffic.map((t, i) => (
+                <tr key={i}>
+                  <td className="muted" style={{ width: 90, whiteSpace: "nowrap" }}>
+                    {new Date(t.at).toLocaleTimeString()}
+                  </td>
+                  <td style={{ width: 210 }}>
+                    <code>{t.kind}</code>
+                  </td>
+                  <td className="mono">{t.detail}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
       <p className="note">
         Slack has no API for reading an app's own event subscriptions or interactivity URL, so those are the two things this cannot verify. Both must point at{" "}
         <code>{check.eventsUrl}</code>, with <code>message.channels</code> and <code>reaction_added</code> subscribed.
