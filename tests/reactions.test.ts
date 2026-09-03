@@ -116,6 +116,7 @@ describe("Resolve button", () => {
     channel: "C_HELP",
     threadTs: PARENT,
     user,
+    action: "resolve" as const,
     triggerId: `trig-${user}-${Math.random()}`,
     ...over,
   });
@@ -150,5 +151,49 @@ describe("Resolve button", () => {
     await flush();
     expect(ctx.chatwootMock.toggleStatusAsAgent).toHaveBeenCalledTimes(1);
     expect(await acceptResolveButton(ctx, click("U_AGENT", { threadTs: "1700000000.009999" }))).toBe("I can't find this thread in Chatwoot.");
+  });
+});
+
+describe("Reopen button", () => {
+  const reopen = (user: string) => ({ channel: "C_HELP", threadTs: PARENT, user, action: "reopen" as const, triggerId: `t-${user}-${Math.random()}` });
+
+  it("an agent reopens through the application API", async () => {
+    const ctx = await setup();
+    expect(await acceptResolveButton(ctx, reopen("U_AGENT"))).toBeNull();
+    await flush();
+    expect(ctx.chatwootMock.toggleStatusAsAgent).toHaveBeenCalledWith(42, "open", "agent-token");
+  });
+
+  it("the asker only flips the public toggle when the conversation really is resolved", async () => {
+    const ctx = await setup();
+    // Currently open: the toggle would resolve it, so do nothing.
+    expect(await acceptResolveButton(ctx, reopen("U_ALICE"))).toBeNull();
+    await flush();
+    expect(ctx.chatwootMock.toggleStatusAsContact).not.toHaveBeenCalled();
+
+    ctx.chatwootMock.listContactConversations.mockResolvedValueOnce([{ id: 42, status: "resolved" }]);
+    expect(await acceptResolveButton(ctx, reopen("U_ALICE"))).toBeNull();
+    await flush();
+    expect(ctx.chatwootMock.toggleStatusAsContact).toHaveBeenCalledWith("src-U_ALICE", 42);
+  });
+
+  it("refuses anyone else, naming the action", async () => {
+    const ctx = await setup();
+    expect(await acceptResolveButton(ctx, reopen("U_RANDO"))).toBe("Only the person who asked or a helper can reopen this thread.");
+  });
+});
+
+describe("button values", () => {
+  it("round-trip and tolerate the pre-toggle format", async () => {
+    const { buttonForStatus, parseButtonValue, welcomeBlocks } = await import("../src/slack/blocks.js");
+    const labels = { resolveButtonLabel: "Resolve", reopenButtonLabel: "Reopen" };
+    expect(buttonForStatus("open", labels)).toEqual({ label: "Resolve", action: "resolve" });
+    expect(buttonForStatus("resolved", labels)).toEqual({ label: "Reopen", action: "reopen" });
+    expect(buttonForStatus("resolved", { ...labels, reopenButtonLabel: null })).toBeNull();
+    const blocks = welcomeBlocks("hi", PARENT, buttonForStatus("resolved", labels));
+    const value = (blocks[1] as { elements: { value: string }[] }).elements[0]!.value;
+    expect(parseButtonValue(value)).toEqual({ action: "reopen", threadTs: PARENT });
+    expect(parseButtonValue(PARENT)).toEqual({ action: "resolve", threadTs: PARENT }); // old messages
+    expect(parseButtonValue("nonsense:1")).toBeNull();
   });
 });

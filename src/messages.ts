@@ -3,3 +3,4 @@ export const DEFAULT_WELCOME_MESSAGE = "Hi there :neocat_approve: a helper shoul
 export const DEFAULT_RESOLVE_MESSAGE = ":neocat: Help request marked as resolved.";
 export const DEFAULT_REOPEN_MESSAGE = "Thread reopened.";
 export const DEFAULT_RESOLVE_BUTTON_LABEL = "Resolve";
+export const DEFAULT_REOPEN_BUTTON_LABEL = "Reopen";

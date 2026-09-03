@@ -3,7 +3,8 @@ import type { Request, Response, Router } from "express";
 import type { AppContext } from "../context.js";
 import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
-import { deleteSystemMessage, postSystemMessage, postToSlackThread, resolvePostIdentity, SlackUploadUnavailable, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
+import { buttonForStatus, welcomeBlocks } from "../slack/blocks.js";
+import { deleteSystemMessage, postSystemMessage, postToSlackThread, resolvePostIdentity, SlackUploadUnavailable, updateSystemMessage, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
 import { chatwootToSlackText } from "../slack/text.js";
 import { findThreadByConversation, isRelayedChatwoot, recordRelayed, recordRelayedFiles, setThreadStatus } from "../store.js";
 
@@ -215,6 +216,18 @@ export async function applyChatwootStatus(ctx: AppContext, job: ChatwootStatusJo
     if (text) statusMessageTs = await postSystemMessage(bridge, thread.slackChannel, thread.slackThreadTs, text);
   }
   await setThreadStatus(ctx.db, thread.id, { lastStatus: job.status, statusMessageTs });
+
+  // Flip the welcome message's button between Resolve and Reopen.
+  if (thread.welcomeMessageTs && bridge.row.welcomeMessage) {
+    const button = buttonForStatus(job.status, bridge.row);
+    await updateSystemMessage(
+      bridge,
+      thread.slackChannel,
+      thread.welcomeMessageTs,
+      bridge.row.welcomeMessage,
+      welcomeBlocks(bridge.row.welcomeMessage, thread.slackThreadTs, button),
+    ).catch((err) => log.warn("could not re-label the thread button", { conversationId: job.conversationId, error: err instanceof Error ? err.message : String(err) }));
+  }
   log.info("conversation status changed", { bridge: bridge.row.name, conversationId: job.conversationId, status: job.status, notice: Boolean(text) });
 }
 

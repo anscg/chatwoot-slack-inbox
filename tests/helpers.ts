@@ -61,7 +61,12 @@ export function mockChatwoot(): MockChatwoot {
 
 export interface MockSlack {
   users: { info: ReturnType<typeof vi.fn> };
-  chat: { postMessage: ReturnType<typeof vi.fn>; postEphemeral: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
+  chat: {
+    postMessage: ReturnType<typeof vi.fn>;
+    postEphemeral: ReturnType<typeof vi.fn>;
+    update: ReturnType<typeof vi.fn>;
+    delete: ReturnType<typeof vi.fn>;
+  };
   files: { uploadV2: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
 }
 
@@ -84,6 +89,7 @@ export function mockSlack(): MockSlack {
     chat: {
       postMessage: vi.fn(async () => ({ ok: true, ts: `${Date.now() / 1000}` })),
       postEphemeral: vi.fn(async () => ({ ok: true })),
+      update: vi.fn(async () => ({ ok: true })),
       delete: vi.fn(async () => ({ ok: true })),
     },
   };
@@ -103,6 +109,7 @@ export interface BridgeOverrides {
   reactionAssign?: string | null;
   welcomeMessage?: string | null;
   resolveButtonLabel?: string | null;
+  reopenButtonLabel?: string | null;
 }
 
 /**
@@ -145,6 +152,7 @@ export async function addBridge(ctx: TestContext, over: BridgeOverrides, chatwoo
     chatwootInboxId: 10 + (over.accountId ?? 1),
     welcomeMessage: over.welcomeMessage === undefined ? "Hi there :neocat_approve: a helper will be with you soon." : over.welcomeMessage,
     resolveButtonLabel: over.resolveButtonLabel === undefined ? "Resolve" : over.resolveButtonLabel,
+    reopenButtonLabel: over.reopenButtonLabel === undefined ? "Reopen" : over.reopenButtonLabel,
     resolveMessage: ":neocat: Help request marked as resolved.",
     reopenMessage: "Thread reopened.",
     chatwootApiTokenEnc: encryptToken("service-token", TEST_KEY),

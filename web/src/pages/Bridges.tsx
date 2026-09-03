@@ -15,6 +15,7 @@ interface Draft {
   reactionAssign: string;
   welcomeMessage: string;
   resolveButtonLabel: string;
+  reopenButtonLabel: string;
   resolveMessage: string;
   reopenMessage: string;
   enabled: boolean;
@@ -33,6 +34,7 @@ const EMPTY: Draft = {
   reactionAssign: "eyes",
   welcomeMessage: "",
   resolveButtonLabel: "",
+  reopenButtonLabel: "",
   resolveMessage: "",
   reopenMessage: "",
   enabled: true,
@@ -57,6 +59,7 @@ function fromBridge(b: Bridge): Draft {
     reactionAssign: b.reactionAssign ?? "",
     welcomeMessage: b.welcomeMessage ?? "",
     resolveButtonLabel: b.resolveButtonLabel ?? "",
+    reopenButtonLabel: b.reopenButtonLabel ?? "",
     resolveMessage: b.resolveMessage ?? "",
     reopenMessage: b.reopenMessage ?? "",
     enabled: b.enabled,
@@ -117,7 +120,8 @@ export function Bridges({ me }: { me: Me }) {
                     <br />
                     assign: {b.reactionAssign ? <code>:{b.reactionAssign}:</code> : <span className="pill off">off</span>}
                     <br />
-                    button: {b.resolveButtonLabel ? <code>{b.resolveButtonLabel}</code> : <span className="pill off">off</span>}
+                    button: {b.resolveButtonLabel ? <code>{b.resolveButtonLabel}</code> : <span className="pill off">off</span>} /{" "}
+                    {b.reopenButtonLabel ? <code>{b.reopenButtonLabel}</code> : <span className="pill off">off</span>}
                   </td>
                   <td>{b.enabled ? <span className="pill ok">enabled</span> : <span className="pill off">disabled</span>}</td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
@@ -216,7 +220,15 @@ function CheckPanel({ check, onClose }: { check: BridgeCheck | "loading"; onClos
           <Row ok={check.chatwoot?.ok ?? null} label="Chatwoot service token" detail={check.chatwoot?.error ? <span className="err">{check.chatwoot.error}</span> : `account ${check.chatwoot?.accountId}, ${check.chatwoot?.agents} agents`} />
           <Row ok={check.threads > 0} label="Threads bridged so far" detail={String(check.threads)} />
           <Row ok={Boolean(b.reactionResolve)} label="Resolve reaction" detail={b.reactionResolve ? `:${b.reactionResolve}: — react on the first message of the thread, not on a reply` : "off"} />
-          <Row ok={Boolean(b.resolveButtonLabel)} label="Resolve button" detail={b.resolveButtonLabel ? `"${b.resolveButtonLabel}" — appears on welcome messages posted after this was set` : "off"} />
+          <Row
+            ok={Boolean(b.resolveButtonLabel)}
+            label="Thread button"
+            detail={
+              b.resolveButtonLabel
+                ? `"${b.resolveButtonLabel}" while open, ${b.reopenButtonLabel ? `"${b.reopenButtonLabel}" while resolved` : "hidden while resolved"} — appears on welcome messages posted after this was set`
+                : "off"
+            }
+          />
           <Row ok={b.welcomeMessage} label="Welcome message" detail={b.welcomeMessage ? "set" : "off"} />
           <Row ok={b.resolveMessage && b.reopenMessage} label="Resolved / reopened notices" detail={`${b.resolveMessage ? "resolved set" : "resolved off"}, ${b.reopenMessage ? "reopened set" : "reopened off"}`} />
         </tbody>
@@ -301,6 +313,7 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
       reactionAssign: d.reactionAssign,
       welcomeMessage: d.welcomeMessage,
       resolveButtonLabel: d.resolveButtonLabel,
+      reopenButtonLabel: d.reopenButtonLabel,
       resolveMessage: d.resolveMessage,
       reopenMessage: d.reopenMessage,
       enabled: d.enabled,
@@ -464,9 +477,14 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
           <textarea rows={2} value={d.welcomeMessage} onChange={set("welcomeMessage")} />
         </div>
         <div className="field">
-          <label>Resolve button on the welcome message (blank = no button)</label>
+          <label>Button while open (blank = no button)</label>
           <input value={d.resolveButtonLabel} onChange={set("resolveButtonLabel")} placeholder="Resolve" />
           <p className="note">Needs Interactivity enabled on the bridge's Slack app, pointing at the same request URL as its events.</p>
+        </div>
+        <div className="field">
+          <label>Button while resolved (blank = no button)</label>
+          <input value={d.reopenButtonLabel} onChange={set("reopenButtonLabel")} placeholder="Reopen" />
+          <p className="note">The welcome message's button is re-labelled whenever Chatwoot reports a status change.</p>
         </div>
         <div className="field">
           <label>Resolved message (requires the conversation_status_changed webhook event)</label>

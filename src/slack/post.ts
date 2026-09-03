@@ -229,6 +229,11 @@ export async function postSystemMessage(bridge: Bridge, channel: string, threadT
   });
 }
 
+/** Re-render the welcome message, e.g. to swap its button between Resolve and Reopen. */
+export async function updateSystemMessage(bridge: Bridge, channel: string, ts: string, text: string, blocks: KnownBlock[]): Promise<void> {
+  await bridge.slack.chat.update({ channel, ts, text, blocks });
+}
+
 /**
  * Private, in-thread feedback to one person. `respond()` via an interaction's response_url lands in
  * the channel rather than the thread, so post the ephemeral message explicitly instead. Not

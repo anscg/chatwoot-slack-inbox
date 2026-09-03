@@ -101,6 +101,10 @@ export async function upsertAgent(db: Db, row: typeof agents.$inferInsert): Prom
   return out;
 }
 
+export async function setWelcomeMessageTs(db: Db, threadId: number, ts: string): Promise<void> {
+  await db.update(threads).set({ welcomeMessageTs: ts }).where(eq(threads.id, threadId));
+}
+
 export async function setThreadStatus(db: Db, threadId: number, patch: { lastStatus: string; statusMessageTs: string | null }): Promise<void> {
   await db.update(threads).set(patch).where(eq(threads.id, threadId));
 }

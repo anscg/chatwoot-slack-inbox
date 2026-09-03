@@ -7,7 +7,15 @@ const PARENT = "1700000000.000100";
 
 async function setup() {
   const ctx = await makeContext();
-  await ctx.db.insert(threads).values({ slackChannel: "C_HELP", slackThreadTs: PARENT, chatwootAccountId: 1, chatwootConversationId: 42, chatwootContactSourceId: "s", slackAuthorId: "U_ALICE" });
+  await ctx.db.insert(threads).values({
+    slackChannel: "C_HELP",
+    slackThreadTs: PARENT,
+    chatwootAccountId: 1,
+    chatwootConversationId: 42,
+    chatwootContactSourceId: "s",
+    slackAuthorId: "U_ALICE",
+    welcomeMessageTs: "1700000000.000101",
+  });
   let n = 0;
   ctx.slackMock.chat.postMessage.mockImplementation(async () => ({ ok: true, ts: `1700000000.00090${n++}` }));
   return ctx;
@@ -31,12 +39,19 @@ describe("status messages", () => {
     await applyChatwootStatus(ctx, { conversationId: 42, status: "resolved", accountId: 1 });
     expect(ctx.slackMock.chat.postMessage).toHaveBeenCalledTimes(1);
 
+    // The welcome message's button now offers Reopen.
+    const edit = ctx.slackMock.chat.update.mock.calls[0]![0] as { ts: string; blocks: { elements?: { text?: { text?: string }; value?: string }[] }[] };
+    expect(edit.ts).toBe("1700000000.000101");
+    expect(edit.blocks[1]?.elements?.[0]).toMatchObject({ text: { text: "Reopen" }, value: `reopen:${PARENT}` });
+
     // Contact replies -> Chatwoot reopens.
     await applyChatwootStatus(ctx, { conversationId: 42, status: "open", accountId: 1 });
     expect(ctx.slackMock.chat.delete).toHaveBeenCalledWith({ channel: "C_HELP", ts: "1700000000.000900" });
     expect(ctx.slackMock.chat.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ text: "Thread reopened." }));
     [t] = await ctx.db.select().from(threads);
     expect(t).toMatchObject({ lastStatus: "open", statusMessageTs: "1700000000.000901" });
+    const back = ctx.slackMock.chat.update.mock.calls[1]![0] as { blocks: { elements?: { text?: { text?: string } }[] }[] };
+    expect(back.blocks[1]?.elements?.[0]).toMatchObject({ text: { text: "Resolve" } });
 
     // Resolved again: the "reopened" notice goes away, resolved notice returns.
     await applyChatwootStatus(ctx, { conversationId: 42, status: "resolved", accountId: 1 });

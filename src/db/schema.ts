@@ -29,8 +29,9 @@ export const bridges = pgTable(
     reactionAssign: text("reaction_assign"),
     /** Bot messages posted in the Slack thread; null disables each. */
     welcomeMessage: text("welcome_message"),
-    /** Label of the Resolve button on the welcome message; null hides the button. */
+    /** Labels of the button on the welcome message, by conversation state; null hides it. */
     resolveButtonLabel: text("resolve_button_label"),
+    reopenButtonLabel: text("reopen_button_label"),
     resolveMessage: text("resolve_message"),
     reopenMessage: text("reopen_message"),
     enabled: boolean("enabled").notNull().default(true),
@@ -55,6 +56,8 @@ export const threads = pgTable(
     /** Last Chatwoot status we saw, and the ts of the status message currently posted in the thread. */
     lastStatus: text("last_status"),
     statusMessageTs: text("status_message_ts"),
+    /** ts of the bot's welcome message, so its button can be re-labelled when the status changes. */
+    welcomeMessageTs: text("welcome_message_ts"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

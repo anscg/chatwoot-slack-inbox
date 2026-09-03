@@ -8,7 +8,7 @@ import type { AppContext } from "../context.js";
 import { encryptToken } from "../crypto.js";
 import { agents, bridges, relayed, retries, threads } from "../db/schema.js";
 import { log } from "../logger.js";
-import { DEFAULT_REOPEN_MESSAGE, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_MESSAGE, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
+import { DEFAULT_REOPEN_BUTTON_LABEL, DEFAULT_REOPEN_MESSAGE, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_MESSAGE, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
 import { ADMIN_COOKIE, parseCookies, Signer, type AdminSession } from "../session.js";
 import { bridgeManifest, SLUG_RE, slugify } from "../slack/manifest.js";
 
@@ -43,6 +43,14 @@ const messageField = z
   .nullable()
   .optional();
 
+/** Slack button labels max out at 75 characters; blank hides the button. */
+const buttonLabelField = z
+  .string()
+  .max(75)
+  .transform((v) => (v.trim() === "" ? null : v.trim()))
+  .nullable()
+  .optional();
+
 const bridgeInput = z.object({
   name: z.string().trim().min(1).max(80),
   slug: z.string().trim().regex(SLUG_RE, "lowercase letters, digits and dashes, max 40 chars"),
@@ -56,7 +64,8 @@ const bridgeInput = z.object({
   reactionResolve: reactionField,
   reactionAssign: reactionField,
   welcomeMessage: messageField,
-  resolveButtonLabel: z.string().max(75).transform((v) => (v.trim() === "" ? null : v.trim())).nullable().optional(),
+  resolveButtonLabel: buttonLabelField,
+  reopenButtonLabel: buttonLabelField,
   resolveMessage: messageField,
   reopenMessage: messageField,
   enabled: z.boolean().optional(),
@@ -108,6 +117,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
       defaults: {
         welcomeMessage: DEFAULT_WELCOME_MESSAGE,
         resolveButtonLabel: DEFAULT_RESOLVE_BUTTON_LABEL,
+        reopenButtonLabel: DEFAULT_REOPEN_BUTTON_LABEL,
         resolveMessage: DEFAULT_RESOLVE_MESSAGE,
         reopenMessage: DEFAULT_REOPEN_MESSAGE,
       },
@@ -186,6 +196,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           reactionAssign: d.reactionAssign === undefined ? "eyes" : d.reactionAssign,
           welcomeMessage: d.welcomeMessage === undefined ? DEFAULT_WELCOME_MESSAGE : d.welcomeMessage,
           resolveButtonLabel: d.resolveButtonLabel === undefined ? DEFAULT_RESOLVE_BUTTON_LABEL : d.resolveButtonLabel,
+          reopenButtonLabel: d.reopenButtonLabel === undefined ? DEFAULT_REOPEN_BUTTON_LABEL : d.reopenButtonLabel,
           resolveMessage: d.resolveMessage === undefined ? DEFAULT_RESOLVE_MESSAGE : d.resolveMessage,
           reopenMessage: d.reopenMessage === undefined ? DEFAULT_REOPEN_MESSAGE : d.reopenMessage,
           enabled: d.enabled ?? true,
@@ -239,6 +250,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           ...(d.reactionAssign !== undefined ? { reactionAssign: d.reactionAssign } : {}),
           ...(d.welcomeMessage !== undefined ? { welcomeMessage: d.welcomeMessage } : {}),
           ...(d.resolveButtonLabel !== undefined ? { resolveButtonLabel: d.resolveButtonLabel } : {}),
+          ...(d.reopenButtonLabel !== undefined ? { reopenButtonLabel: d.reopenButtonLabel } : {}),
           ...(d.resolveMessage !== undefined ? { resolveMessage: d.resolveMessage } : {}),
           ...(d.reopenMessage !== undefined ? { reopenMessage: d.reopenMessage } : {}),
           ...(d.enabled !== undefined ? { enabled: d.enabled } : {}),
@@ -272,6 +284,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           reactionResolve: row.reactionResolve,
           reactionAssign: row.reactionAssign,
           resolveButtonLabel: row.resolveButtonLabel,
+          reopenButtonLabel: row.reopenButtonLabel,
           welcomeMessage: Boolean(row.welcomeMessage),
           resolveMessage: Boolean(row.resolveMessage),
           reopenMessage: Boolean(row.reopenMessage),
