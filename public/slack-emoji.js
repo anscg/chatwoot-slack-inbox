@@ -351,36 +351,44 @@
   function isEmojiDialog(node) {
     if (!node || !node.matches) return false;
     if (node.matches(".emoji-dialog")) return true;
-    return node.matches('[role="dialog"]') && !!node.querySelector("input") && !!node.querySelector(".grid button, .emoji--row button");
+    if (!node.matches('[role="dialog"]') || !node.querySelector("input")) return false;
+    // A dialog holding a search box over a fixed-height pane of emoji buttons. The pane is
+    // matched by shape, not by content: when Chatwoot's own search finds nothing it swaps
+    // the grid for an empty state, and the picker has to stay recognisable either way.
+    return !!node.querySelector(".h-60, .emoji-item, .grid button, .emoji--row button");
   }
 
+  /**
+   * Chatwoot's picker is a search box followed by two sibling `h-60` panes it swaps between:
+   * the emoji list, or a "no emoji" state when its own search comes up empty. Both are Vue's
+   * to create and destroy, so they are hidden by a stylesheet rule rather than by touching
+   * the nodes, and ours is appended after them where a re-render leaves it alone.
+   */
   function takeOverDialog(dialog) {
-    dialog.setAttribute(DONE, "");
-    var scroller = nativeScroller(dialog);
-    if (!scroller) return;
-    scroller.style.display = "none"; // Chatwoot's own grid; ours replaces it in place
+    var box = dialog.querySelector('input[type="text"], input[type="search"]');
+    var wrapper = box && box.parentElement && box.parentElement.parentElement;
+    if (!wrapper) return;
+    dialog.setAttribute(DONE, "picker");
 
     var panel = document.createElement("div");
     panel.className = "cw-slack-panel";
-    scroller.parentElement.insertBefore(panel, scroller.nextSibling);
-
-    var box = dialog.querySelector('input[type="text"], input[type="search"]');
+    wrapper.appendChild(panel);
 
     // The Slack half arrives from the bridge, so the standard half is painted at once and
     // the Slack section drops in above it when the answer lands.
     function draw() {
-      paint([]);
       var query = box ? box.value : "";
-      if (normalise(query)) searchSoon(query, paint);
+      paint([], !normalise(query));
+      if (normalise(query)) searchSoon(query);
     }
 
-    var searchSoon = debounce(function (query, then) {
+    var searchSoon = debounce(function (query) {
       searchCustom(query, PICKER_CUSTOM, function (hits) {
-        if (box && box.value === query) then(hits);
+        if (box && box.value === query) paint(hits, true);
       });
     });
 
-    function paint(hits) {
+    function paint(hits, settled) {
       var query = box ? box.value : "";
       var parts = [];
       shown = [];
@@ -390,7 +398,7 @@
       if (normalise(query)) {
         var matches = searchStandard(query, PICKER_STANDARD);
         if (matches.length) parts.push(section("Emoji", matches));
-        if (!hits.length && !matches.length) parts.push('<p class="cw-slack-note">Searching Slack…</p>');
+        if (!hits.length && !matches.length) parts.push('<p class="cw-slack-note">' + (settled ? "No emoji match " + esc(query) : "Searching…") + "</p>");
       } else {
         // Idle: the standard set, grouped the way Chatwoot groups it.
         for (var g = 0; g < groups.length; g++) {
@@ -431,15 +439,6 @@
     return function (item) {
       return item.group === index;
     };
-  }
-
-  /** Chatwoot's own emoji list: the one scrolling box inside the dialog. */
-  function nativeScroller(dialog) {
-    var divs = dialog.querySelectorAll("div");
-    for (var i = 0; i < divs.length; i++) {
-      if (divs[i].scrollHeight > divs[i].clientHeight + 8) return divs[i];
-    }
-    return dialog.querySelector(".emoji-item");
   }
 
   // ---------------------------------------------------------------- the `:` typeahead
@@ -618,6 +617,72 @@
     }
   }
 
+  // ---------------------------------------------------------------- composer preview
+
+  /**
+   * The composer itself cannot show the images. It is a ProseMirror contenteditable whose
+   * DOM the editor owns and re-parses: foreign nodes there would be read back into the
+   * document, and since images are not in the schema the text would be lost. The editor's
+   * own decoration API needs its EditorView, which Chatwoot keeps module-private and does
+   * not expose on the DOM or on window. So the shortcodes stay as text while typing, and a
+   * strip under the box shows what they will look like — appearing only once what has been
+   * typed actually names an emoji.
+   */
+  function preview(editor) {
+    var box = editor.closest(".reply-box") || editor.parentElement;
+    if (!box) return;
+    var strip = box.querySelector(".cw-slack-preview");
+    if (!strip) {
+      strip = document.createElement("div");
+      strip.className = "cw-slack-preview";
+      strip.hidden = true;
+      box.appendChild(strip);
+    }
+
+    var text = editor.textContent || "";
+    var names = [];
+    SHORTCODE.lastIndex = 0;
+    var match;
+    while ((match = SHORTCODE.exec(text))) names.push(match[1].toLowerCase());
+    if (!names.length) {
+      strip.hidden = true;
+      return;
+    }
+
+    lookup(names, function () {
+      if (!strip.isConnected) return;
+      var parts = [];
+      var at = 0;
+      var hit = false;
+      SHORTCODE.lastIndex = 0;
+      var found;
+      while ((found = SHORTCODE.exec(text))) {
+        var item = known[found[1].toLowerCase()];
+        if (!item) continue;
+        hit = true;
+        parts.push(esc(text.slice(at, found.index)));
+        parts.push('<img class="cw-slack-inline" src="' + esc(item.url) + '" alt="' + esc(found[0]) + '" title="' + esc(found[0]) + '" loading="lazy">');
+        at = found.index + found[0].length;
+      }
+      if (!hit) {
+        strip.hidden = true;
+        return;
+      }
+      parts.push(esc(text.slice(at)));
+      strip.innerHTML = parts.join("");
+      strip.hidden = false;
+    });
+  }
+
+  var previewSoon = debounce(function (editor) {
+    if (editor.isConnected) preview(editor);
+  });
+
+  document.addEventListener("input", function (e) {
+    var editor = editorOf(e.target);
+    if (editor && editor.rich) previewSoon(editor.el);
+  });
+
   // ---------------------------------------------------------------- wiring
 
   // One selector answers "is there anything to do?", so the observer stays cheap on a
@@ -630,6 +695,7 @@
   var budget = { count: 0, since: 0 };
 
   function refresh() {
+    reclaim();
     if (!document.querySelector(PENDING)) return;
     if (!spend()) return;
     if (observer) observer.disconnect();
@@ -648,6 +714,18 @@
         observer.observe(document.documentElement, { childList: true, subtree: true });
       }
     }
+  }
+
+  /**
+   * Vue owns these surfaces and rebuilds them as its own state changes, which can take our
+   * list with it. Anything we marked but no longer holds our list is unmarked, and the next
+   * pass takes it over again.
+   */
+  function reclaim() {
+    var picker = document.querySelector('[' + DONE + '="picker"]');
+    if (picker && !picker.querySelector(".cw-slack-panel")) picker.removeAttribute(DONE);
+    var popover = document.querySelector('[' + DONE + '="emoji"]');
+    if (popover && !popover.querySelector(".cw-slack-rows")) popover.removeAttribute(DONE);
   }
 
   /** If decorating ever runs away, stop watching rather than pinning the tab's main thread. */
@@ -692,7 +770,11 @@
     ".cw-slack-row-code{margin-inline-start:auto;opacity:.55;font-size:12px}",
     ".cw-slack-row:hover,.cw-slack-row.is-active{background:rgba(127,127,127,.22)}",
     ".cw-slack-inline{display:inline-block;width:1.35em;height:1.35em;object-fit:contain;vertical-align:-0.3em}",
-    // Chatwoot's own list and its "no items found" notice, in a popover this script owns.
+    ".cw-slack-preview{margin:0 12px 6px;padding:4px 8px;border-radius:8px;font-size:13px;line-height:1.5;white-space:pre-wrap;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;background:rgba(127,127,127,.12);opacity:.85}",
+    // Chatwoot's own panes, in the surfaces this script owns: the picker's list and its
+    // "no emoji" state (sibling h-60 divs it swaps between), and the typeahead's list and
+    // "no items found" notice. Hidden by rule, since Vue recreates the nodes as it likes.
+    '[data-slack-emoji="picker"] .h-60{display:none!important}',
     '[data-slack-emoji="emoji"] ul[role="listbox"]:not(.cw-slack-rows){display:none!important}',
     '[data-slack-emoji="emoji"] [role="status"]{display:none!important}',
   ].join("");
