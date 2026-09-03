@@ -25,7 +25,16 @@ export function recentTraffic(bridgeId: number): TrafficEntry[] {
 
 interface SlackRequestBody {
   type?: string;
-  event?: { type?: string; subtype?: string; user?: string; bot_id?: string; ts?: string; reaction?: string; item?: { ts?: string; channel?: string } };
+  event?: {
+    type?: string;
+    subtype?: string;
+    user?: string;
+    bot_id?: string;
+    ts?: string;
+    deleted_ts?: string;
+    reaction?: string;
+    item?: { ts?: string; channel?: string };
+  };
   actions?: { action_id?: string; value?: string }[];
   user?: { id?: string };
 }
@@ -39,6 +48,8 @@ export function describeSlackRequest(body: unknown): { kind: string; detail: str
       return { kind: `event:${e.type}`, detail: `:${e.reaction}: by ${e.user ?? "?"} on message ${e.item?.ts ?? "?"}` };
     }
     if (e.type === "message") {
+      // A deletion carries the removed message's ts separately, and that is the interesting one.
+      if (e.subtype === "message_deleted") return { kind: "event:message_deleted", detail: `deleted message ${e.deleted_ts ?? "?"}` };
       return { kind: "event:message", detail: `${e.subtype ?? "plain"} from ${e.user ?? e.bot_id ?? "?"} at ${e.ts ?? "?"}` };
     }
     return { kind: `event:${e.type ?? "unknown"}`, detail: "" };

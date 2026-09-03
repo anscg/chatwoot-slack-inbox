@@ -37,6 +37,14 @@ describe("a deleted question", () => {
     expect(await acceptSlackMessage(ctx, "Ev3", deletion())).toBe("thread already marked deleted");
   });
 
+  it("describes the deletion in the bridge's traffic log", async () => {
+    const { describeSlackRequest } = await import("../src/diagnostics.js");
+    expect(describeSlackRequest({ type: "event_callback", event: { type: "message", subtype: "message_deleted", ts: "2", deleted_ts: PARENT } })).toEqual({
+      kind: "event:message_deleted",
+      detail: `deleted message ${PARENT}`,
+    });
+  });
+
   it("takes its own leftover messages down when nothing human remains", async () => {
     const ctx = await setup();
     await acceptSlackMessage(ctx, "Ev1", post());
