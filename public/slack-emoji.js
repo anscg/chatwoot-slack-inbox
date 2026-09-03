@@ -617,72 +617,6 @@
     }
   }
 
-  // ---------------------------------------------------------------- composer preview
-
-  /**
-   * The composer itself cannot show the images. It is a ProseMirror contenteditable whose
-   * DOM the editor owns and re-parses: foreign nodes there would be read back into the
-   * document, and since images are not in the schema the text would be lost. The editor's
-   * own decoration API needs its EditorView, which Chatwoot keeps module-private and does
-   * not expose on the DOM or on window. So the shortcodes stay as text while typing, and a
-   * strip under the box shows what they will look like — appearing only once what has been
-   * typed actually names an emoji.
-   */
-  function preview(editor) {
-    var box = editor.closest(".reply-box") || editor.parentElement;
-    if (!box) return;
-    var strip = box.querySelector(".cw-slack-preview");
-    if (!strip) {
-      strip = document.createElement("div");
-      strip.className = "cw-slack-preview";
-      strip.hidden = true;
-      box.appendChild(strip);
-    }
-
-    var text = editor.textContent || "";
-    var names = [];
-    SHORTCODE.lastIndex = 0;
-    var match;
-    while ((match = SHORTCODE.exec(text))) names.push(match[1].toLowerCase());
-    if (!names.length) {
-      strip.hidden = true;
-      return;
-    }
-
-    lookup(names, function () {
-      if (!strip.isConnected) return;
-      var parts = [];
-      var at = 0;
-      var hit = false;
-      SHORTCODE.lastIndex = 0;
-      var found;
-      while ((found = SHORTCODE.exec(text))) {
-        var item = known[found[1].toLowerCase()];
-        if (!item) continue;
-        hit = true;
-        parts.push(esc(text.slice(at, found.index)));
-        parts.push('<img class="cw-slack-inline" src="' + esc(item.url) + '" alt="' + esc(found[0]) + '" title="' + esc(found[0]) + '" loading="lazy">');
-        at = found.index + found[0].length;
-      }
-      if (!hit) {
-        strip.hidden = true;
-        return;
-      }
-      parts.push(esc(text.slice(at)));
-      strip.innerHTML = parts.join("");
-      strip.hidden = false;
-    });
-  }
-
-  var previewSoon = debounce(function (editor) {
-    if (editor.isConnected) preview(editor);
-  });
-
-  document.addEventListener("input", function (e) {
-    var editor = editorOf(e.target);
-    if (editor && editor.rich) previewSoon(editor.el);
-  });
-
   // ---------------------------------------------------------------- wiring
 
   // One selector answers "is there anything to do?", so the observer stays cheap on a
@@ -770,7 +704,6 @@
     ".cw-slack-row-code{margin-inline-start:auto;opacity:.55;font-size:12px}",
     ".cw-slack-row:hover,.cw-slack-row.is-active{background:rgba(127,127,127,.22)}",
     ".cw-slack-inline{display:inline-block;width:1.35em;height:1.35em;object-fit:contain;vertical-align:-0.3em}",
-    ".cw-slack-preview{margin:0 12px 6px;padding:4px 8px;border-radius:8px;font-size:13px;line-height:1.5;white-space:pre-wrap;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;background:rgba(127,127,127,.12);opacity:.85}",
     // Chatwoot's own panes, in the surfaces this script owns: the picker's list and its
     // "no emoji" state (sibling h-60 divs it swaps between), and the typeahead's list and
     // "no items found" notice. Hidden by rule, since Vue recreates the nodes as it likes.

@@ -135,7 +135,7 @@ The endpoints are unauthenticated but `Access-Control-Allow-Origin` is limited t
 
 ### What it doesn't do
 
-Shortcodes stay as text **while you type** them. The composer is ProseMirror, which owns and reconciles its own DOM; painting images into it would fight the editor and risk corrupting the document. Text goes in through `execCommand("insertText")` over a selected range — the path a paste takes — and nothing is written into the composer's DOM directly. Once sent, the message renders with images like any other bubble.
+Shortcodes stay as text **while you type** them, and no script loaded through `DASHBOARD_SCRIPTS` can change that. Three routes exist and Chatwoot closes all three: ProseMirror decorations (the right mechanism, display-only) need the `EditorView`, which is reachable neither from the DOM nor from Chatwoot, which holds it in a module-private `let`; image nodes are in the schema but `buildEditor` always installs `isolateImagesPlugin`, which splits any paragraph so an image "ends up alone in its own paragraph — no text to its left or right"; and writing into the composer's DOM directly gets re-parsed by ProseMirror, which would eat the text. Inline rendering in the composer needs a patch to Chatwoot itself. Once sent, the message renders with images like any other bubble.
 
 Because it hooks a UI it does not own, the script is written to fail quietly: every hook is guarded, surfaces it has handled are marked so the DOM observer stays cheap, and if decorating ever runs away it stops watching rather than pinning the tab. It was written against Chatwoot **4.17.1**; an upgrade that reworks the picker or the `:` popover can silently switch it off, and the endpoints keep working either way.
 
