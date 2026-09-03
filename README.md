@@ -53,7 +53,7 @@ Redeploys are safe: migrations are idempotent, bridges/agents live in Postgres, 
 
 ## Agents linking their accounts
 
-Every agent should visit `${PUBLIC_URL}/link` once. It runs a Slack OAuth flow (user scopes `chat:write`, `files:write`) and stores the user token encrypted; replies made in Chatwoot are then posted to Slack **from the agent's own Slack account** via `chat.postMessage`. Their Slack email is matched against the agents of every bridged Chatwoot account to find their Chatwoot user.
+Every agent should visit `${PUBLIC_URL}/link` once (admins get linked automatically when they sign in to the panel). It runs a Slack OAuth flow (user scopes `chat:write`, `files:write`) and stores the user token encrypted; replies made in Chatwoot are then posted to Slack **from the agent's own Slack account** via `chat.postMessage`. Their Slack email is matched against the agents of every bridged Chatwoot account to find their Chatwoot user.
 
 If an agent replies before linking, the message still reaches Slack (posted by the bridge's bot with the agent's name and avatar) and the agent gets a private note in the conversation pointing them to `/link`.
 

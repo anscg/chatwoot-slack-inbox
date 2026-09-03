@@ -42,10 +42,34 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
 
   // ---- Agent linking: user scope chat:write so replies can be posted as the agent ----
 
+  const USER_SCOPES = "chat:write,files:write";
+
+  /** Exchange an OAuth code for the authorizing user's id + user token. */
+  async function exchangeCode(code: string, redirectUri: string): Promise<{ userId: string; userToken: string }> {
+    const token = await ctx.hub.oauth.v2.access({ client_id: config.SLACK_CLIENT_ID, client_secret: config.SLACK_CLIENT_SECRET, code, redirect_uri: redirectUri });
+    const userId = token.authed_user?.id;
+    const userToken = token.authed_user?.access_token;
+    if (!userId || !userToken) throw new Error("oauth response missing authed_user token");
+    return { userId, userToken };
+  }
+
+  /** Store the user token and try to match a Chatwoot agent by email. */
+  async function linkAgent(userId: string, userToken: string, email: string | undefined): Promise<{ id: number; name: string } | undefined> {
+    const match = await matchChatwootAgentByEmail(ctx, email);
+    await upsertAgent(ctx.db, {
+      slackUserId: userId,
+      email: email ?? null,
+      slackUserTokenEnc: encryptToken(userToken, config.TOKEN_ENCRYPTION_KEY),
+      ...(match ? { chatwootAgentId: match.id } : {}),
+    });
+    log.info("agent linked slack account", { slackUserId: userId, matched: Boolean(match) });
+    return match;
+  }
+
   router.get("/link", (_req: Request, res: Response) => {
     const url = new URL("https://slack.com/oauth/v2/authorize");
     url.searchParams.set("client_id", config.SLACK_CLIENT_ID);
-    url.searchParams.set("user_scope", "chat:write,files:write");
+    url.searchParams.set("user_scope", USER_SCOPES);
     url.searchParams.set("redirect_uri", linkRedirect);
     url.searchParams.set("state", signer.sign({ purpose: "link" }, STATE_TTL_MS));
     res.redirect(url.toString());
@@ -62,25 +86,9 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
       return;
     }
     try {
-      const token = await ctx.hub.oauth.v2.access({
-        client_id: config.SLACK_CLIENT_ID,
-        client_secret: config.SLACK_CLIENT_SECRET,
-        code: String(req.query.code ?? ""),
-        redirect_uri: linkRedirect,
-      });
-      const userId = token.authed_user?.id;
-      const userToken = token.authed_user?.access_token;
-      if (!userId || !userToken) throw new Error("oauth response missing authed_user token");
-
+      const { userId, userToken } = await exchangeCode(String(req.query.code ?? ""), linkRedirect);
       const profile = await getSlackProfile(ctx.hub, userId);
-      const match = await matchChatwootAgentByEmail(ctx, profile.email);
-      await upsertAgent(ctx.db, {
-        slackUserId: userId,
-        email: profile.email ?? null,
-        slackUserTokenEnc: encryptToken(userToken, config.TOKEN_ENCRYPTION_KEY),
-        ...(match ? { chatwootAgentId: match.id } : {}),
-      });
-      log.info("agent linked slack account", { slackUserId: userId, matched: Boolean(match) });
+      const match = await linkAgent(userId, userToken, profile.email);
 
       const matchNote = match
         ? `<p>Matched to Chatwoot agent <strong>${match.name}</strong> by email. Your Slack replies will be attributed to you in Chatwoot; Chatwoot replies will post to Slack as you.</p>`
@@ -92,43 +100,38 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
     }
   });
 
-  // ---- Admin sign-in: Sign in with Slack (OpenID Connect), allow-listed user IDs only ----
+  // ---- Admin sign-in: same OAuth v2 flow as /link (Slack forbids mixing OpenID scopes with
+  // other user scopes in one app install). Signing in also links the admin's account. ----
 
   router.get("/admin/login", (_req: Request, res: Response) => {
-    const nonce = signer.sign({ n: Math.random() }, STATE_TTL_MS).slice(-24);
-    const url = new URL("https://slack.com/openid/connect/authorize");
-    url.searchParams.set("response_type", "code");
-    url.searchParams.set("scope", "openid profile email");
+    const url = new URL("https://slack.com/oauth/v2/authorize");
     url.searchParams.set("client_id", config.SLACK_CLIENT_ID);
+    url.searchParams.set("user_scope", USER_SCOPES);
     url.searchParams.set("redirect_uri", adminRedirect);
-    url.searchParams.set("state", signer.sign({ purpose: "admin", nonce }, STATE_TTL_MS));
-    url.searchParams.set("nonce", nonce);
+    url.searchParams.set("state", signer.sign({ purpose: "admin" }, STATE_TTL_MS));
     res.redirect(url.toString());
   });
 
   router.get("/admin/callback", async (req: Request, res: Response) => {
-    const state = signer.verify<{ purpose: string; nonce: string }>(String(req.query.state ?? ""));
+    const state = signer.verify<{ purpose: string }>(String(req.query.state ?? ""));
     if (!state || state.purpose !== "admin") {
       res.status(400).send(page("Sign-in failed", "<p>Invalid or expired state. <a href='/admin/login'>Try again</a>.</p>"));
       return;
     }
+    if (req.query.error) {
+      res.status(400).send(page("Sign-in cancelled", `<p>Slack said: <code>${String(req.query.error)}</code>. <a href='/admin/login'>Try again</a>.</p>`));
+      return;
+    }
     try {
-      const tok = await ctx.hub.openid.connect.token({
-        client_id: config.SLACK_CLIENT_ID,
-        client_secret: config.SLACK_CLIENT_SECRET,
-        code: String(req.query.code ?? ""),
-        redirect_uri: adminRedirect,
-      });
-      const claims = decodeIdToken(tok.id_token);
-      if (claims.nonce !== state.nonce || claims.aud !== config.SLACK_CLIENT_ID) throw new Error("id_token nonce/audience mismatch");
-      const userId = claims["https://slack.com/user_id"];
-      if (!userId) throw new Error("id_token missing user id");
+      const { userId, userToken } = await exchangeCode(String(req.query.code ?? ""), adminRedirect);
       if (!config.ADMIN_SLACK_USER_IDS.includes(userId)) {
         log.warn("admin sign-in denied", { userId });
         res.status(403).send(page("Not allowed", `<p>Slack user <code>${userId}</code> is not in <code>ADMIN_SLACK_USER_IDS</code>.</p>`));
         return;
       }
-      const session: AdminSession = { userId, name: claims.name ?? userId };
+      const profile = await getSlackProfile(ctx.hub, userId);
+      await linkAgent(userId, userToken, profile.email); // admins are usually agents too; no harm otherwise
+      const session: AdminSession = { userId, name: profile.name };
       res.cookie(ADMIN_COOKIE, signer.sign(session, ADMIN_SESSION_TTL_MS), {
         httpOnly: true,
         sameSite: "lax",
@@ -147,24 +150,4 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
     res.clearCookie(ADMIN_COOKIE, { path: "/" });
     res.redirect("/admin/");
   });
-}
-
-interface IdTokenClaims {
-  aud?: string;
-  nonce?: string;
-  name?: string;
-  email?: string;
-  "https://slack.com/user_id"?: string;
-  "https://slack.com/team_id"?: string;
-}
-
-/**
- * The id_token came straight from Slack over TLS in the code exchange, so we trust
- * its origin; we still check nonce/aud. (No JWKS fetch needed for this flow.)
- */
-function decodeIdToken(idToken: string | undefined): IdTokenClaims {
-  if (!idToken) throw new Error("no id_token in response");
-  const parts = idToken.split(".");
-  if (parts.length !== 3) throw new Error("malformed id_token");
-  return JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as IdTokenClaims;
 }

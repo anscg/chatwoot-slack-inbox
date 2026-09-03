@@ -69,9 +69,6 @@ oauth_config:
     user:
       - chat:write
       - files:write
-      - openid
-      - email
-      - profile
     bot:
       - users:read
       - users:read.email
