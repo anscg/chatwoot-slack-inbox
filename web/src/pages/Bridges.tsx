@@ -1,5 +1,5 @@
-import { useEffect, useState, type FormEvent } from "react";
-import { api, type Bridge, type Introspection, type Me, type SlackIntrospection } from "../api";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { api, type Bridge, type BridgeCheck, type Introspection, type Me, type SlackIntrospection } from "../api";
 import { Copy, useResource } from "./common";
 
 interface Draft {
@@ -67,6 +67,7 @@ export function Bridges({ me }: { me: Me }) {
   const { data, error, reload } = useResource<Bridge[]>("/bridges");
   const [editing, setEditing] = useState<Bridge | "new" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [check, setCheck] = useState<BridgeCheck | "loading" | null>(null);
 
   return (
     <>
@@ -115,9 +116,25 @@ export function Bridges({ me }: { me: Me }) {
                     resolve: {b.reactionResolve ? <code>:{b.reactionResolve}:</code> : <span className="pill off">off</span>}
                     <br />
                     assign: {b.reactionAssign ? <code>:{b.reactionAssign}:</code> : <span className="pill off">off</span>}
+                    <br />
+                    button: {b.resolveButtonLabel ? <code>{b.resolveButtonLabel}</code> : <span className="pill off">off</span>}
                   </td>
                   <td>{b.enabled ? <span className="pill ok">enabled</span> : <span className="pill off">disabled</span>}</td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    <button
+                      className="small"
+                      onClick={async () => {
+                        setCheck("loading");
+                        try {
+                          setCheck(await api.get<BridgeCheck>(`/bridges/${b.id}/check`));
+                        } catch (e) {
+                          setNotice((e as Error).message);
+                          setCheck(null);
+                        }
+                      }}
+                    >
+                      Check
+                    </button>{" "}
                     <button className="small" onClick={() => setEditing(b)}>
                       Edit
                     </button>{" "}
@@ -138,6 +155,7 @@ export function Bridges({ me }: { me: Me }) {
           </table>
         )}
       </div>
+      {check && <CheckPanel check={check} onClose={() => setCheck(null)} />}
       {editing && (
         <BridgeForm
           me={me}
@@ -151,6 +169,63 @@ export function Bridges({ me }: { me: Me }) {
         />
       )}
     </>
+  );
+}
+
+function Row({ ok, label, detail }: { ok: boolean | null; label: string; detail?: ReactNode }) {
+  return (
+    <tr>
+      <td style={{ width: 28 }}>{ok === null ? <span className="muted">–</span> : ok ? <span className="pill ok">ok</span> : <span className="pill warn">!</span>}</td>
+      <td style={{ width: 210 }}>{label}</td>
+      <td>{detail}</td>
+    </tr>
+  );
+}
+
+function CheckPanel({ check, onClose }: { check: BridgeCheck | "loading"; onClose: () => void }) {
+  if (check === "loading") return <div className="panel muted">Checking…</div>;
+  const s = check.slack;
+  const missing = s?.missingScopes ?? [];
+  const b = check.behaviour;
+  return (
+    <div className="panel">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2 style={{ margin: 0 }}>Check: {check.name}</h2>
+        <button className="small" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <table>
+        <tbody>
+          <Row ok={check.enabled && check.loaded} label="Bridge live" detail={check.enabled ? (check.loaded ? "enabled and loaded" : "enabled but failed to load, see logs") : "disabled"} />
+          <Row
+            ok={s ? !s.error : null}
+            label="Slack bot token"
+            detail={s?.error ? <span className="err">{s.error}</span> : <>@{s?.bot} in {s?.team}</>}
+          />
+          <Row
+            ok={missing.length === 0}
+            label="Slack bot scopes"
+            detail={missing.length ? <span className="err">missing: {missing.join(", ")} — add them in the app's OAuth &amp; Permissions, then reinstall</span> : `all ${s?.scopes?.length ?? 0} granted`}
+          />
+          <Row
+            ok={s?.channel ? Boolean(s.channel.isMember) : null}
+            label="Bot in the channel"
+            detail={s?.channel?.error ? <span className="err">{s.channel.error}</span> : s?.channel?.isMember ? `#${s.channel.name}` : <span className="err">invite it to #{s?.channel?.name ?? s?.channel?.id}</span>}
+          />
+          <Row ok={check.chatwoot?.ok ?? null} label="Chatwoot service token" detail={check.chatwoot?.error ? <span className="err">{check.chatwoot.error}</span> : `account ${check.chatwoot?.accountId}, ${check.chatwoot?.agents} agents`} />
+          <Row ok={check.threads > 0} label="Threads bridged so far" detail={String(check.threads)} />
+          <Row ok={Boolean(b.reactionResolve)} label="Resolve reaction" detail={b.reactionResolve ? `:${b.reactionResolve}: — react on the first message of the thread, not on a reply` : "off"} />
+          <Row ok={Boolean(b.resolveButtonLabel)} label="Resolve button" detail={b.resolveButtonLabel ? `"${b.resolveButtonLabel}" — appears on welcome messages posted after this was set` : "off"} />
+          <Row ok={b.welcomeMessage} label="Welcome message" detail={b.welcomeMessage ? "set" : "off"} />
+          <Row ok={b.resolveMessage && b.reopenMessage} label="Resolved / reopened notices" detail={`${b.resolveMessage ? "resolved set" : "resolved off"}, ${b.reopenMessage ? "reopened set" : "reopened off"}`} />
+        </tbody>
+      </table>
+      <p className="note">
+        Slack has no API for reading an app's own event subscriptions or interactivity URL, so those are the two things this cannot verify. Both must point at{" "}
+        <code>{check.eventsUrl}</code>, with <code>message.channels</code> and <code>reaction_added</code> subscribed.
+      </p>
+    </div>
   );
 }
 

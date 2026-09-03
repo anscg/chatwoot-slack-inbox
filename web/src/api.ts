@@ -97,6 +97,30 @@ export interface Retry {
   lastError: string | null;
   createdAt: string;
 }
+export interface BridgeCheck {
+  name: string;
+  enabled: boolean;
+  loaded: boolean;
+  eventsUrl: string;
+  threads: number;
+  behaviour: {
+    reactionResolve: string | null;
+    reactionAssign: string | null;
+    resolveButtonLabel: string | null;
+    welcomeMessage: boolean;
+    resolveMessage: boolean;
+    reopenMessage: boolean;
+  };
+  slack?: {
+    bot?: string;
+    team?: string;
+    scopes?: string[];
+    missingScopes?: string[];
+    channel?: { id: string; name?: string; isMember?: boolean; error?: string };
+    error?: string;
+  };
+  chatwoot?: { ok?: boolean; accountId?: number; agents?: number; error?: string };
+}
 export interface SlackIntrospection {
   bot: { userId?: string; botId?: string; name?: string; team?: string };
   channel?: { id: string; name?: string; isMember: boolean; error?: string };

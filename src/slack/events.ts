@@ -340,7 +340,11 @@ export function registerSlackEvents(app: App, ctx: AppContext): void {
 
   app.event("reaction_added", async ({ event, body }) => {
     const eventId = (body as { event_id?: string }).event_id ?? `${event.event_ts}`;
-    const reason = await acceptSlackReaction(ctx, eventId, event as unknown as IncomingSlackReaction);
-    if (reason) log.info("ignoring slack reaction", { reason, user: (event as { user?: string }).user, reaction: (event as { reaction?: string }).reaction, eventId });
+    const ev = event as unknown as IncomingSlackReaction;
+    const reason = await acceptSlackReaction(ctx, eventId, ev);
+    // Both outcomes at info level: "did the reaction reach us, and what did we decide" must be
+    // answerable from the logs alone.
+    if (reason) log.info("ignoring slack reaction", { reason, user: ev.user, reaction: ev.reaction, ts: ev.item?.ts, eventId });
+    else log.info("accepted slack reaction", { user: ev.user, reaction: ev.reaction, ts: ev.item?.ts, eventId });
   });
 }

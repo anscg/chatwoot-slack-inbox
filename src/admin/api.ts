@@ -12,6 +12,20 @@ import { DEFAULT_REOPEN_MESSAGE, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_M
 import { ADMIN_COOKIE, parseCookies, Signer, type AdminSession } from "../session.js";
 import { bridgeManifest, SLUG_RE, slugify } from "../slack/manifest.js";
 
+/** Bot scopes a bridge app needs. Slack reports what was actually granted in the x-oauth-scopes header. */
+export const REQUIRED_BOT_SCOPES = [
+  "chat:write",
+  "chat:write.customize",
+  "channels:history",
+  "channels:read",
+  "reactions:read",
+  "reactions:write",
+  "files:read",
+  "files:write",
+  "users:read",
+  "users:read.email",
+];
+
 const reactionField = z
   .string()
   .trim()
@@ -234,6 +248,69 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
         .returning();
       await ctx.bridges.reload();
       res.json({ ...redact(row!), warning });
+    }),
+  );
+
+  /**
+   * Per-bridge self check: what Slack actually granted this app, whether the bot is in the channel,
+   * whether Chatwoot answers, and which behaviours are switched on. Slack offers no API to read an
+   * app's own event subscriptions, so those stay the one thing a human has to confirm.
+   */
+  api.get(
+    "/bridges/:id/check",
+    wrap(async (req, res) => {
+      const id = Number(req.params.id);
+      const row = (await db.select().from(bridges).where(eq(bridges.id, id)))[0];
+      if (!row) return void res.status(404).json({ error: "not found" });
+      const bridge = ctx.bridges.get(id);
+      const out: Record<string, unknown> = {
+        name: row.name,
+        enabled: row.enabled,
+        loaded: Boolean(bridge),
+        eventsUrl: `${config.PUBLIC_URL}/slack/events/${row.slug}`,
+        behaviour: {
+          reactionResolve: row.reactionResolve,
+          reactionAssign: row.reactionAssign,
+          resolveButtonLabel: row.resolveButtonLabel,
+          welcomeMessage: Boolean(row.welcomeMessage),
+          resolveMessage: Boolean(row.resolveMessage),
+          reopenMessage: Boolean(row.reopenMessage),
+        },
+      };
+      const [{ n: threadCount } = { n: 0 }] = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(threads)
+        .where(eq(threads.slackChannel, row.slackChannel));
+      out.threads = threadCount;
+
+      if (bridge) {
+        try {
+          const auth = await bridge.slack.auth.test();
+          const scopes = (auth.response_metadata as { scopes?: string[] } | undefined)?.scopes ?? [];
+          const slack: Record<string, unknown> = {
+            bot: auth.user_id,
+            team: auth.team,
+            scopes,
+            missingScopes: REQUIRED_BOT_SCOPES.filter((s) => !scopes.includes(s)),
+          };
+          try {
+            const info = await bridge.slack.conversations.info({ channel: row.slackChannel });
+            slack.channel = { id: row.slackChannel, name: info.channel?.name, isMember: Boolean(info.channel?.is_member) };
+          } catch (err) {
+            slack.channel = { id: row.slackChannel, error: err instanceof Error ? err.message : String(err) };
+          }
+          out.slack = slack;
+        } catch (err) {
+          out.slack = { error: err instanceof Error ? err.message : String(err) };
+        }
+        try {
+          const agents = await bridge.chatwoot.listAgents();
+          out.chatwoot = { ok: true, accountId: row.chatwootAccountId, agents: agents.length };
+        } catch (err) {
+          out.chatwoot = { error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+      res.json(out);
     }),
   );
 
