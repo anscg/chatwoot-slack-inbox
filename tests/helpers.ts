@@ -98,6 +98,7 @@ export interface BridgeOverrides {
   reactionResolve?: string | null;
   reactionAssign?: string | null;
   welcomeMessage?: string | null;
+  resolveButtonLabel?: string | null;
 }
 
 /**
@@ -139,6 +140,7 @@ export async function addBridge(ctx: TestContext, over: BridgeOverrides, chatwoo
     chatwootInboxIdentifier: `inbox-${over.accountId ?? 1}`,
     chatwootInboxId: 10 + (over.accountId ?? 1),
     welcomeMessage: over.welcomeMessage === undefined ? "Hi there :neocat_approve: a helper will be with you soon." : over.welcomeMessage,
+    resolveButtonLabel: over.resolveButtonLabel === undefined ? "Resolve" : over.resolveButtonLabel,
     resolveMessage: ":neocat: Help request marked as resolved.",
     reopenMessage: "Thread reopened.",
     chatwootApiTokenEnc: encryptToken("service-token", TEST_KEY),

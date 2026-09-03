@@ -8,6 +8,7 @@ import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
 import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, recordRelayed } from "../store.js";
 import { downloadSlackFiles, type SlackFileRef } from "./files.js";
+import { RESOLVE_ACTION_ID, welcomeBlocks } from "./blocks.js";
 import { BRIDGE_METADATA_EVENT, postSystemMessage } from "./post.js";
 import { slackToChatwootText } from "./text.js";
 import { getSlackProfile } from "./users.js";
@@ -31,6 +32,19 @@ export interface SlackReactionJob extends Record<string, unknown> {
   ts: string;
   user: string;
   action: "resolve" | "assign";
+  /** How the action was triggered, for logging only. */
+  via?: "reaction" | "button";
+}
+
+/**
+ * Who may resolve a thread: a linked Chatwoot agent (a helper) or the person who asked.
+ * Returns null when allowed, or a reason to refuse.
+ */
+export async function checkResolvePermission(ctx: AppContext, thread: Thread, userId: string): Promise<string | null> {
+  const agent = await findAgentBySlackUser(ctx.db, userId);
+  if (agent?.chatwootAgentId) return null;
+  if (userId === thread.slackAuthorId) return null;
+  return "resolve: not agent or author";
 }
 
 /** Minimal shape of the incoming Slack message event we care about. */
@@ -109,13 +123,45 @@ export async function acceptSlackReaction(ctx: AppContext, eventId: string, ev: 
   const thread = await findThreadBySlack(ctx.db, ev.item.channel, ev.item.ts);
   if (!thread) return "not a thread parent";
 
-  const agent = await findAgentBySlackUser(ctx.db, ev.user);
-  const isAgent = Boolean(agent?.chatwootAgentId);
-  if (action === "assign" && !isAgent) return "assign: not a linked agent";
-  if (action === "resolve" && !isAgent && ev.user !== thread.slackAuthorId) return "resolve: not agent or author";
+  if (action === "assign") {
+    const agent = await findAgentBySlackUser(ctx.db, ev.user);
+    if (!agent?.chatwootAgentId) return "assign: not a linked agent";
+  } else {
+    const refusal = await checkResolvePermission(ctx, thread, ev.user);
+    if (refusal) return refusal;
+  }
 
   if (!(await markEventSeen(ctx.db, eventId))) return "duplicate event";
-  const job: SlackReactionJob = { channel: ev.item.channel, ts: ev.item.ts, user: ev.user, action };
+  const job: SlackReactionJob = { channel: ev.item.channel, ts: ev.item.ts, user: ev.user, action, via: "reaction" };
+  void ctx.retry.runOrEnqueue(JOB_SLACK_REACTION, job);
+  return null;
+}
+
+export interface ResolveButtonClick {
+  channel: string;
+  /** Thread parent ts, from the button's own value. */
+  threadTs: string;
+  user: string;
+  /** Unique per interaction; used to drop duplicate deliveries. */
+  triggerId: string;
+}
+
+/**
+ * Handle a click on the welcome message's Resolve button. Same permission gate as the ✅ reaction,
+ * but a click gets an answer: returns a message to show the clicker privately, or null on success.
+ */
+export async function acceptResolveButton(ctx: AppContext, click: ResolveButtonClick): Promise<string | null> {
+  const bridge = ctx.bridges.forChannel(click.channel);
+  if (!bridge) return "This channel is not bridged to Chatwoot any more.";
+  const thread = await findThreadBySlack(ctx.db, click.channel, click.threadTs);
+  if (!thread) return "I can't find this thread in Chatwoot.";
+  const refusal = await checkResolvePermission(ctx, thread, click.user);
+  if (refusal) {
+    log.info("refused resolve button", { reason: refusal, user: click.user, channel: click.channel, ts: click.threadTs });
+    return "Only the person who asked or a helper can resolve this thread.";
+  }
+  if (!(await markEventSeen(ctx.db, `interaction:${click.triggerId}`))) return null; // duplicate delivery
+  const job: SlackReactionJob = { channel: click.channel, ts: click.threadTs, user: click.user, action: "resolve", via: "button" };
   void ctx.retry.runOrEnqueue(JOB_SLACK_REACTION, job);
   return null;
 }
@@ -184,7 +230,8 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, g
           log.warn("could not refresh contact avatar", { contactId: contact.id, error: err instanceof Error ? err.message : String(err) });
         });
         if (bridge.row.welcomeMessage) {
-          await postSystemMessage(bridge, job.channel, job.ts, bridge.row.welcomeMessage).catch((err) => {
+          const blocks = welcomeBlocks(bridge.row.welcomeMessage, job.ts, bridge.row.resolveButtonLabel);
+          await postSystemMessage(bridge, job.channel, job.ts, bridge.row.welcomeMessage, blocks).catch((err) => {
             log.warn("could not post welcome message", { channel: job.channel, ts: job.ts, error: err instanceof Error ? err.message : String(err) });
           });
         }
@@ -237,7 +284,7 @@ export async function applySlackReaction(ctx: AppContext, job: SlackReactionJob)
       return;
     }
     await resolveConversation(bridge, thread, agent, agentToken(ctx, agent));
-    log.info("resolved conversation", { bridge: bridge.row.name, conversationId: thread.chatwootConversationId, by: job.user });
+    log.info("resolved conversation", { bridge: bridge.row.name, conversationId: thread.chatwootConversationId, by: job.user, via: job.via ?? "reaction" });
   } catch (err) {
     permanentIf4xx(err);
   }
@@ -267,6 +314,28 @@ export function registerSlackEvents(app: App, ctx: AppContext): void {
     const eventId = (body as { event_id?: string }).event_id ?? `${event.channel}:${(event as { ts: string }).ts}`;
     const reason = await acceptSlackMessage(ctx, eventId, event as unknown as IncomingSlackMessage);
     if (reason) log.debug("skipping slack message", { reason, eventId });
+  });
+
+  app.action({ action_id: RESOLVE_ACTION_ID }, async ({ ack, body, respond }) => {
+    await ack(); // Slack wants an ack within 3s; everything else happens after.
+    const b = body as unknown as {
+      user?: { id?: string };
+      channel?: { id?: string };
+      trigger_id?: string;
+      message?: { thread_ts?: string; ts?: string };
+      actions?: { value?: string }[];
+    };
+    const channel = b.channel?.id;
+    const user = b.user?.id;
+    const threadTs = b.actions?.[0]?.value ?? b.message?.thread_ts ?? b.message?.ts;
+    if (!channel || !user || !threadTs) {
+      log.warn("resolve button click missing context", { channel, user, threadTs });
+      return;
+    }
+    const problem = await acceptResolveButton(ctx, { channel, threadTs, user, triggerId: b.trigger_id ?? `${channel}:${threadTs}:${user}` });
+    await respond({ response_type: "ephemeral", replace_original: false, text: problem ?? "Marked as resolved." }).catch((err) =>
+      log.warn("could not answer resolve button click", { error: err instanceof Error ? err.message : String(err) }),
+    );
   });
 
   app.event("reaction_added", async ({ event, body }) => {

@@ -23,6 +23,9 @@ oauth_config:
       - users:read
       - users:read.email
 settings:
+  interactivity:
+    is_enabled: true
+    request_url: ${opts.publicUrl}/slack/events/${opts.slug}
   event_subscriptions:
     request_url: ${opts.publicUrl}/slack/events/${opts.slug}
     bot_events:

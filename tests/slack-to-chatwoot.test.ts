@@ -30,7 +30,11 @@ describe("Slack -> Chatwoot", () => {
     expect(bridge.chatwootMock.createConversation).toHaveBeenCalledWith("src-U_ALICE");
     // Welcome message from the bot in the new thread.
     expect(bridge.slackMock.chat.postMessage).toHaveBeenCalledTimes(1);
-    expect(bridge.slackMock.chat.postMessage.mock.calls[0]![0]).toMatchObject({ channel: "C_HELP", thread_ts: "1700000000.000100", text: expect.stringContaining("helper will be with you soon") });
+    const welcome = bridge.slackMock.chat.postMessage.mock.calls[0]![0] as { channel: string; thread_ts: string; text: string; blocks: { type: string; elements?: { action_id?: string; value?: string; text?: { text?: string } }[] }[] };
+    expect(welcome).toMatchObject({ channel: "C_HELP", thread_ts: "1700000000.000100", text: expect.stringContaining("helper will be with you soon") });
+    // ...with a Resolve button whose value carries the thread ts.
+    const actions = welcome.blocks.find((b) => b.type === "actions");
+    expect(actions?.elements?.[0]).toMatchObject({ action_id: "chatwoot_bridge_resolve", value: "1700000000.000100", text: { text: "Resolve" } });
     // Contact refreshed after creation so the Slack avatar/name win over Gravatar or stale data.
     expect(bridge.chatwootMock.updateContact).toHaveBeenCalledWith(1, { name: "Name U_ALICE", avatarUrl: "https://avatars.test/U_ALICE.png" });
     expect(bridge.chatwootMock.createContactMessage).toHaveBeenCalledWith("src-U_ALICE", 42, "help me @Name U_BOB & co", [], "1700000000.000100");

@@ -8,7 +8,7 @@ import type { AppContext } from "../context.js";
 import { encryptToken } from "../crypto.js";
 import { agents, bridges, relayed, retries, threads } from "../db/schema.js";
 import { log } from "../logger.js";
-import { DEFAULT_REOPEN_MESSAGE, DEFAULT_RESOLVE_MESSAGE, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
+import { DEFAULT_REOPEN_MESSAGE, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_MESSAGE, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
 import { ADMIN_COOKIE, parseCookies, Signer, type AdminSession } from "../session.js";
 import { bridgeManifest, SLUG_RE, slugify } from "../slack/manifest.js";
 
@@ -42,6 +42,7 @@ const bridgeInput = z.object({
   reactionResolve: reactionField,
   reactionAssign: reactionField,
   welcomeMessage: messageField,
+  resolveButtonLabel: z.string().max(75).transform((v) => (v.trim() === "" ? null : v.trim())).nullable().optional(),
   resolveMessage: messageField,
   reopenMessage: messageField,
   enabled: z.boolean().optional(),
@@ -90,7 +91,12 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
       user: (req as Request & { admin: AdminSession }).admin,
       chatwootBaseUrl: config.CHATWOOT_BASE_URL,
       publicUrl: config.PUBLIC_URL,
-      defaults: { welcomeMessage: DEFAULT_WELCOME_MESSAGE, resolveMessage: DEFAULT_RESOLVE_MESSAGE, reopenMessage: DEFAULT_REOPEN_MESSAGE },
+      defaults: {
+        welcomeMessage: DEFAULT_WELCOME_MESSAGE,
+        resolveButtonLabel: DEFAULT_RESOLVE_BUTTON_LABEL,
+        resolveMessage: DEFAULT_RESOLVE_MESSAGE,
+        reopenMessage: DEFAULT_REOPEN_MESSAGE,
+      },
     });
   });
 
@@ -165,6 +171,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           reactionResolve: d.reactionResolve === undefined ? "white_check_mark" : d.reactionResolve,
           reactionAssign: d.reactionAssign === undefined ? "eyes" : d.reactionAssign,
           welcomeMessage: d.welcomeMessage === undefined ? DEFAULT_WELCOME_MESSAGE : d.welcomeMessage,
+          resolveButtonLabel: d.resolveButtonLabel === undefined ? DEFAULT_RESOLVE_BUTTON_LABEL : d.resolveButtonLabel,
           resolveMessage: d.resolveMessage === undefined ? DEFAULT_RESOLVE_MESSAGE : d.resolveMessage,
           reopenMessage: d.reopenMessage === undefined ? DEFAULT_REOPEN_MESSAGE : d.reopenMessage,
           enabled: d.enabled ?? true,
@@ -217,6 +224,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           ...(d.reactionResolve !== undefined ? { reactionResolve: d.reactionResolve } : {}),
           ...(d.reactionAssign !== undefined ? { reactionAssign: d.reactionAssign } : {}),
           ...(d.welcomeMessage !== undefined ? { welcomeMessage: d.welcomeMessage } : {}),
+          ...(d.resolveButtonLabel !== undefined ? { resolveButtonLabel: d.resolveButtonLabel } : {}),
           ...(d.resolveMessage !== undefined ? { resolveMessage: d.resolveMessage } : {}),
           ...(d.reopenMessage !== undefined ? { reopenMessage: d.reopenMessage } : {}),
           ...(d.enabled !== undefined ? { enabled: d.enabled } : {}),

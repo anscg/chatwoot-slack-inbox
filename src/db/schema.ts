@@ -29,6 +29,8 @@ export const bridges = pgTable(
     reactionAssign: text("reaction_assign"),
     /** Bot messages posted in the Slack thread; null disables each. */
     welcomeMessage: text("welcome_message"),
+    /** Label of the Resolve button on the welcome message; null hides the button. */
+    resolveButtonLabel: text("resolve_button_label"),
     resolveMessage: text("resolve_message"),
     reopenMessage: text("reopen_message"),
     enabled: boolean("enabled").notNull().default(true),

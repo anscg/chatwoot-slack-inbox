@@ -14,6 +14,7 @@ interface Draft {
   reactionResolve: string;
   reactionAssign: string;
   welcomeMessage: string;
+  resolveButtonLabel: string;
   resolveMessage: string;
   reopenMessage: string;
   enabled: boolean;
@@ -31,6 +32,7 @@ const EMPTY: Draft = {
   reactionResolve: "white_check_mark",
   reactionAssign: "eyes",
   welcomeMessage: "",
+  resolveButtonLabel: "",
   resolveMessage: "",
   reopenMessage: "",
   enabled: true,
@@ -54,6 +56,7 @@ function fromBridge(b: Bridge): Draft {
     reactionResolve: b.reactionResolve ?? "",
     reactionAssign: b.reactionAssign ?? "",
     welcomeMessage: b.welcomeMessage ?? "",
+    resolveButtonLabel: b.resolveButtonLabel ?? "",
     resolveMessage: b.resolveMessage ?? "",
     reopenMessage: b.reopenMessage ?? "",
     enabled: b.enabled,
@@ -222,6 +225,7 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
       reactionResolve: d.reactionResolve,
       reactionAssign: d.reactionAssign,
       welcomeMessage: d.welcomeMessage,
+      resolveButtonLabel: d.resolveButtonLabel,
       resolveMessage: d.resolveMessage,
       reopenMessage: d.reopenMessage,
       enabled: d.enabled,
@@ -383,6 +387,11 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
         <div className="field" style={{ gridColumn: "1 / -1" }}>
           <label>Welcome message (new thread)</label>
           <textarea rows={2} value={d.welcomeMessage} onChange={set("welcomeMessage")} />
+        </div>
+        <div className="field">
+          <label>Resolve button on the welcome message (blank = no button)</label>
+          <input value={d.resolveButtonLabel} onChange={set("resolveButtonLabel")} placeholder="Resolve" />
+          <p className="note">Needs Interactivity enabled on the bridge's Slack app, pointing at the same request URL as its events.</p>
         </div>
         <div className="field">
           <label>Resolved message (requires the conversation_status_changed webhook event)</label>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { encryptToken } from "../src/crypto.js";
 import { threads } from "../src/db/schema.js";
-import { acceptSlackReaction, applySlackReaction, JOB_SLACK_REACTION, type IncomingSlackReaction } from "../src/slack/events.js";
+import { acceptResolveButton, acceptSlackReaction, applySlackReaction, JOB_SLACK_REACTION, type IncomingSlackReaction } from "../src/slack/events.js";
 import { upsertAgent } from "../src/store.js";
 import { flush, makeContext, TEST_KEY, type BridgeOverrides } from "./helpers.js";
 
@@ -108,5 +108,47 @@ describe("per-bridge reaction configuration", () => {
     await flush();
     expect(ctx.chatwootMock.assignConversation).not.toHaveBeenCalled();
     expect(ctx.chatwootMock.toggleStatusAsAgent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Resolve button", () => {
+  const click = (user: string, over: Partial<Parameters<typeof acceptResolveButton>[1]> = {}) => ({
+    channel: "C_HELP",
+    threadTs: PARENT,
+    user,
+    triggerId: `trig-${user}-${Math.random()}`,
+    ...over,
+  });
+
+  it("resolves for a linked agent (a helper)", async () => {
+    const ctx = await setup();
+    expect(await acceptResolveButton(ctx, click("U_AGENT"))).toBeNull();
+    await flush();
+    expect(ctx.chatwootMock.toggleStatusAsAgent).toHaveBeenCalledWith(42, "resolved", "agent-token");
+  });
+
+  it("resolves for the person who asked, via the public API", async () => {
+    const ctx = await setup();
+    expect(await acceptResolveButton(ctx, click("U_ALICE"))).toBeNull();
+    await flush();
+    expect(ctx.chatwootMock.toggleStatusAsContact).toHaveBeenCalledWith("src-U_ALICE", 42);
+  });
+
+  it("tells anyone else why they cannot, and does nothing", async () => {
+    const ctx = await setup();
+    expect(await acceptResolveButton(ctx, click("U_RANDO"))).toBe("Only the person who asked or a helper can resolve this thread.");
+    await flush();
+    expect(ctx.chatwootMock.toggleStatusAsAgent).not.toHaveBeenCalled();
+    expect(ctx.chatwootMock.toggleStatusAsContact).not.toHaveBeenCalled();
+  });
+
+  it("ignores a duplicate delivery of the same click and an unknown thread", async () => {
+    const ctx = await setup();
+    const one = click("U_AGENT");
+    expect(await acceptResolveButton(ctx, one)).toBeNull();
+    expect(await acceptResolveButton(ctx, one)).toBeNull();
+    await flush();
+    expect(ctx.chatwootMock.toggleStatusAsAgent).toHaveBeenCalledTimes(1);
+    expect(await acceptResolveButton(ctx, click("U_AGENT", { threadTs: "1700000000.009999" }))).toBe("I can't find this thread in Chatwoot.");
   });
 });

@@ -1,4 +1,4 @@
-import { WebClient, ErrorCode, type WebAPICallResult } from "@slack/web-api";
+import { WebClient, ErrorCode, type KnownBlock, type WebAPICallResult } from "@slack/web-api";
 import { eq } from "drizzle-orm";
 import type { Bridge } from "../bridges.js";
 import type { AppContext } from "../context.js";
@@ -214,12 +214,13 @@ function isAuthError(err: unknown): boolean {
 }
 
 /** A message from the bridge bot itself (welcome / status notices). Returns ts. */
-export async function postSystemMessage(bridge: Bridge, channel: string, threadTs: string, text: string): Promise<string> {
+export async function postSystemMessage(bridge: Bridge, channel: string, threadTs: string, text: string, blocks?: KnownBlock[]): Promise<string> {
   return throttle.run(channel, async () => {
     const res = await bridge.slack.chat.postMessage({
       channel,
       thread_ts: threadTs,
       text,
+      ...(blocks ? { blocks } : {}),
       unfurl_links: false,
       unfurl_media: false,
       metadata: { event_type: BRIDGE_METADATA_EVENT, event_payload: { system: true } },
