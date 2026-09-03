@@ -1,0 +1,28 @@
+# The "hub" app: admin sign-in, agent /link, user lookups. One per installation.
+# Each bridge (channel <-> inbox) gets its own Slack app; the control panel generates that manifest.
+display_information:
+  name: Chatwoot Inbox Bridge
+  description: Sign-in and account linking for the Chatwoot Slack inbox bridge. Unofficial.
+  background_color: "#1f93ff"
+features:
+  bot_user:
+    display_name: Chatwoot Inbox Bridge
+    always_online: false
+oauth_config:
+  redirect_urls:
+    # Replace bridge.example.com with your PUBLIC_URL host.
+    - https://bridge.example.com/link/callback
+    - https://bridge.example.com/admin/callback
+  scopes:
+    user:
+      - chat:write
+      - openid
+      - email
+      - profile
+    bot:
+      - users:read
+      - users:read.email
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

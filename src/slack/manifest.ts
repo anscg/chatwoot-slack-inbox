@@ -1,0 +1,48 @@
+/** Slack app manifest for one bridge's bot. Admin creates the app from this in the panel. */
+export function bridgeManifest(opts: { name: string; slug: string; publicUrl: string }): string {
+  const display = opts.name.slice(0, 35);
+  return `display_information:
+  name: ${yaml(display)}
+  description: ${yaml(`Support inbox bridge for ${opts.name} (Chatwoot). Unofficial.`)}
+  background_color: "#1f93ff"
+features:
+  bot_user:
+    display_name: ${yaml(display)}
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - chat:write.customize
+      - channels:history
+      - channels:read
+      - reactions:read
+      - reactions:write
+      - files:read
+      - users:read
+      - users:read.email
+settings:
+  event_subscriptions:
+    request_url: ${opts.publicUrl}/slack/events/${opts.slug}
+    bot_events:
+      - message.channels
+      - reaction_added
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
+`;
+}
+
+function yaml(s: string): string {
+  return JSON.stringify(s);
+}
+
+export const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+
+export function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+}

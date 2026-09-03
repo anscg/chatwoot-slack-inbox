@@ -1,0 +1,52 @@
+# For Dokploy "Compose" deployments. No host ports: attach a domain to the `app`
+# service in Dokploy (Domains tab, container port 3000) and Traefik routes to it.
+# Set the environment variables from .env.example in Dokploy's Environment tab.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      DATABASE_URL: postgres://chatwoot_slack:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/chatwoot_slack
+      PORT: "3000"
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:?}
+      SLACK_CLIENT_ID: ${SLACK_CLIENT_ID:?}
+      SLACK_CLIENT_SECRET: ${SLACK_CLIENT_SECRET:?}
+      CHATWOOT_BASE_URL: ${CHATWOOT_BASE_URL:?}
+      CHATWOOT_WEBHOOK_SECRET: ${CHATWOOT_WEBHOOK_SECRET:?}
+      ADMIN_SLACK_USER_IDS: ${ADMIN_SLACK_USER_IDS:?}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?}
+      PUBLIC_URL: ${PUBLIC_URL:?}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - dokploy-network
+      - internal
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chatwoot_slack
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: chatwoot_slack
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatwoot_slack -d chatwoot_slack"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+
+volumes:
+  pgdata:
+
+networks:
+  dokploy-network:
+    external: true
+  internal:
