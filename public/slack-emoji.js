@@ -274,7 +274,7 @@
     var node;
     while ((node = walker.nextNode())) if (node.data) last = node;
     if (!last) return null;
-    var match = /:[a-z0-9_+'-]*$/i.exec(last.data);
+    var match = /:[a-z0-9_+'-]*:?$/i.exec(last.data);
     return match ? { node: last, start: match.index, end: last.data.length } : null;
   }
 
@@ -292,7 +292,7 @@
       var el = editor.el;
       var from = el.selectionStart;
       if (replaceTrigger) {
-        var trigger = /:[a-z0-9_+'-]*$/i.exec(el.value.slice(0, from));
+        var trigger = /:[a-z0-9_+'-]*:?$/i.exec(el.value.slice(0, from));
         if (trigger) from = trigger.index;
       }
       el.focus();
@@ -469,8 +469,26 @@
 
     function draw() {
       var query = box.value;
+      // `:cat-wave:` typed out in full is a choice, not a search: Slack completes on the
+      // closing colon, so an exact name goes straight in rather than sitting in the list.
+      var closed = /^([a-z0-9_+'-]+):$/i.exec(query.trim());
+      if (closed) return complete(closed[1].toLowerCase());
       paint([], !normalise(query));
       if (normalise(query)) searchSoon(query);
+    }
+
+    function complete(name) {
+      var glyph = exactStandard(name);
+      if (glyph) return choose(glyph);
+      paint([], false);
+      searchCustom(name, TYPEAHEAD_CUSTOM, function (hits) {
+        for (var i = 0; i < hits.length; i++) {
+          if (hits[i].name === name) return choose(hits[i]);
+        }
+        // Not an emoji anyone has: leave the text alone and go back to searching.
+        return paint(hits, true);
+      });
+      return undefined;
     }
 
     var searchSoon = debounce(function (query) {
@@ -535,6 +553,12 @@
     selected = (index + rows.length) % rows.length;
     for (var i = 0; i < rows.length; i++) rows[i].classList.toggle("is-active", i === selected);
     rows[selected].scrollIntoView({ block: "nearest" });
+  }
+
+  /** A standard emoji whose slug is exactly this name, if there is one. */
+  function exactStandard(name) {
+    for (var i = 0; i < standard.length; i++) if (standard[i].slug === name) return standard[i];
+    return null;
   }
 
   function choose(item) {
