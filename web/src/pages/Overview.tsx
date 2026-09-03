@@ -20,8 +20,9 @@ export function Overview({ me }: { me: Me }) {
       <div className="panel">
         <h2>Setup</h2>
         <p>
-          <strong>Chatwoot webhook.</strong> In each bridged Chatwoot account: Settings → Integrations → Webhooks → add this URL and subscribe to{" "}
-          <code>message_created</code> and <code>conversation_status_changed</code>.
+          <strong>Chatwoot webhook.</strong> Paste this into each bridged API inbox: Settings → Inboxes → the inbox → Configuration → <strong>Webhook URL</strong>. That
+          delivers every event with nothing to subscribe to. If you use an account-level webhook (Settings → Integrations → Webhooks) instead, it must be subscribed to
+          both <code>message_created</code> and <code>conversation_status_changed</code>.
         </p>
         {data && <Copy value={data.webhookUrl} />}
         <p style={{ marginTop: 16 }}>

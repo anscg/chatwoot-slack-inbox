@@ -9,6 +9,9 @@ import { findThreadByConversation, isRelayedChatwoot, recordRelayed, recordRelay
 
 const MAX_ATTACHMENT_BYTES = 40 * 1024 * 1024;
 
+/** Events an API inbox webhook sends constantly; logged at debug so the useful lines stay visible. */
+const CHATTY_EVENTS = new Set(["conversation_typing_on", "conversation_typing_off", "conversation_updated"]);
+
 /** Download Chatwoot attachments so they can be re-uploaded to Slack. Failures fall back to links. */
 async function downloadAttachments(fetchFn: typeof fetch, attachments: ChatwootMessageJob["attachments"]): Promise<{ files: UploadFile[]; failed: ChatwootMessageJob["attachments"] }> {
   const files: UploadFile[] = [];
@@ -227,16 +230,32 @@ export function registerChatwootWebhook(router: Router, ctx: AppContext): void {
 
   router.post("/webhooks/chatwoot/:secret", (req: Request, res: Response) => {
     const secret = String(req.params.secret ?? "");
+    const body = (req.body ?? {}) as ChatwootWebhookPayload;
     if (!secretMatches(secret, ctx.config.CHATWOOT_WEBHOOK_SECRET)) {
+      // Loud on purpose. A wrong secret is the usual reason Chatwoot -> Slack goes quiet, and
+      // Chatwoot only surfaces it as "404 Not Found" against the message, never as a config error.
+      log.warn("rejected chatwoot webhook: the secret in the URL does not match CHATWOOT_WEBHOOK_SECRET", {
+        from: req.ip,
+        event: body.event,
+        gotSecretLength: secret.length,
+        expectedSecretLength: ctx.config.CHATWOOT_WEBHOOK_SECRET.length,
+      });
       res.status(404).end();
       return;
     }
-    const result = classifyWebhook((req.body ?? {}) as ChatwootWebhookPayload);
+    const result = classifyWebhook(body);
     res.status(200).json({ ok: true }); // ack first
-    if ("skip" in result) {
-      log.debug("skipping chatwoot webhook", { reason: result.skip });
-      return;
-    }
+    // Info level so "did Chatwoot reach us at all?" is answerable from the logs. An API inbox's
+    // webhook_url receives every event with no subscription filter, so keep the chatty ones at debug.
+    const line = {
+      event: body.event,
+      messageType: body.message_type,
+      conversationId: body.conversation?.id ?? body.id,
+      outcome: "skip" in result ? `skipped: ${result.skip}` : "queued",
+    };
+    if (CHATTY_EVENTS.has(body.event ?? "")) log.debug("chatwoot webhook", line);
+    else log.info("chatwoot webhook", line);
+    if ("skip" in result) return;
     if ("statusJob" in result) {
       void ctx.retry.runOrEnqueue(JOB_CHATWOOT_STATUS, result.statusJob);
       return;
