@@ -82,6 +82,19 @@ export async function findAgentBySlackUser(db: Db, slackUserId: string): Promise
   return rows[0];
 }
 
+/**
+ * Has this Slack user been through /link? The row alone is not enough: an admin can pre-create one
+ * to attach a Chatwoot token, so it is the stored Slack user token that says they authorized us.
+ */
+export async function hasLinkedSlackAccount(db: Db, slackUserId: string): Promise<boolean> {
+  const rows = await db
+    .select({ token: agents.slackUserTokenEnc })
+    .from(agents)
+    .where(eq(agents.slackUserId, slackUserId))
+    .limit(1);
+  return Boolean(rows[0]?.token);
+}
+
 export async function findAgentByChatwootId(db: Db, chatwootAgentId: number): Promise<Agent | undefined> {
   const rows = await db.select().from(agents).where(eq(agents.chatwootAgentId, chatwootAgentId)).limit(1);
   return rows[0];
@@ -99,6 +112,10 @@ export async function upsertAgent(db: Db, row: typeof agents.$inferInsert): Prom
   const out = rows[0];
   if (!out) throw new Error("agent upsert returned no row");
   return out;
+}
+
+export async function setAgentChatwootToken(db: Db, agentRowId: number, tokenEnc: string): Promise<void> {
+  await db.update(agents).set({ chatwootApiTokenEnc: tokenEnc }).where(eq(agents.id, agentRowId));
 }
 
 export async function markThreadDeleted(db: Db, threadId: number): Promise<void> {

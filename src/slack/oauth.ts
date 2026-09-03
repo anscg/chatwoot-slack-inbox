@@ -1,4 +1,5 @@
 import type { Request, Response, Router } from "express";
+import { agentChatwootToken } from "../agents.js";
 import type { AppContext } from "../context.js";
 import { encryptToken } from "../crypto.js";
 import { log } from "../logger.js";
@@ -7,6 +8,12 @@ import { upsertAgent } from "../store.js";
 import { getSlackProfile } from "./users.js";
 
 const STATE_TTL_MS = 10 * 60_000;
+
+interface LinkResult {
+  match: { id: number; name: string } | undefined;
+  /** True when we hold a Chatwoot token for them, so their Slack replies carry their own face. */
+  attributed: boolean;
+}
 
 function page(title: string, body: string): string {
   return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
@@ -53,17 +60,21 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
     return { userId, userToken };
   }
 
-  /** Store the user token and try to match a Chatwoot agent by email. */
-  async function linkAgent(userId: string, userToken: string, email: string | undefined): Promise<{ id: number; name: string } | undefined> {
+  /**
+   * Store the user token, match a Chatwoot agent by email, and — when a platform app is
+   * configured — fetch that agent's own Chatwoot token so both directions are attributed to them.
+   */
+  async function linkAgent(userId: string, userToken: string, email: string | undefined): Promise<LinkResult> {
     const match = await matchChatwootAgentByEmail(ctx, email);
-    await upsertAgent(ctx.db, {
+    const row = await upsertAgent(ctx.db, {
       slackUserId: userId,
       email: email ?? null,
       slackUserTokenEnc: encryptToken(userToken, config.TOKEN_ENCRYPTION_KEY),
       ...(match ? { chatwootAgentId: match.id } : {}),
     });
-    log.info("agent linked slack account", { slackUserId: userId, matched: Boolean(match) });
-    return match;
+    const attributed = Boolean(await agentChatwootToken(ctx, row));
+    log.info("agent linked slack account", { slackUserId: userId, matched: Boolean(match), attributed });
+    return { match, attributed };
   }
 
   router.get("/link", (_req: Request, res: Response) => {
@@ -88,11 +99,13 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
     try {
       const { userId, userToken } = await exchangeCode(String(req.query.code ?? ""), linkRedirect);
       const profile = await getSlackProfile(ctx.hub, userId);
-      const match = await linkAgent(userId, userToken, profile.email);
+      const { match, attributed } = await linkAgent(userId, userToken, profile.email);
 
-      const matchNote = match
-        ? `<p>Matched to Chatwoot agent <strong>${match.name}</strong> by email. Your Slack replies will be attributed to you in Chatwoot; Chatwoot replies will post to Slack as you.</p>`
-        : `<p><strong>No Chatwoot agent with the email ${profile.email ?? "(none on your Slack profile)"} was found.</strong> Chatwoot replies will still post to Slack as you, but Slack replies count as contact messages until an admin attaches your Chatwoot API token in the control panel.</p>`;
+      const matchNote = !match
+        ? `<p><strong>No Chatwoot agent with the email ${profile.email ?? "(none on your Slack profile)"} was found.</strong> Chatwoot replies will still post to Slack as you, but Slack replies count as contact messages until an admin attaches your Chatwoot API token in the control panel.</p>`
+        : attributed
+          ? `<p>Matched to Chatwoot agent <strong>${match.name}</strong> by email. Your Slack replies will be attributed to you in Chatwoot; Chatwoot replies will post to Slack as you.</p>`
+          : `<p>Matched to Chatwoot agent <strong>${match.name}</strong> by email. Chatwoot replies will post to Slack as you. Your Slack replies are posted by the bridge's service agent with your name on them until an admin attaches your Chatwoot API token in the control panel.</p>`;
       res.send(page("Slack account linked", matchNote + "<p>You can close this tab.</p>"));
     } catch (err) {
       log.error("link callback failed", { error: err instanceof Error ? err.message : String(err) });

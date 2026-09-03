@@ -3,6 +3,7 @@ import { WebClient } from "@slack/web-api";
 import express from "express";
 import { registerAdminApi } from "./admin/api.js";
 import { BridgeRegistry } from "./bridges.js";
+import { ChatwootPlatformClient } from "./chatwoot/platform.js";
 import { registerChatwootWebhook } from "./chatwoot/webhook.js";
 import { loadConfig } from "./config.js";
 import type { AppContext } from "./context.js";
@@ -35,7 +36,11 @@ async function main(): Promise<void> {
 
   const retry = new RetryQueue(db);
   // `ctx.bridges` is assigned right after; handlers only touch it at event time.
-  const ctx = { config, db, hub, retry } as AppContext;
+  const platform = config.CHATWOOT_PLATFORM_TOKEN
+    ? new ChatwootPlatformClient(config.CHATWOOT_BASE_URL, config.CHATWOOT_PLATFORM_TOKEN)
+    : undefined;
+  if (!platform) log.info("no CHATWOOT_PLATFORM_TOKEN; agent Chatwoot tokens must be attached by hand in the panel");
+  const ctx = { config, db, hub, retry, platform } as AppContext;
   const bridges = new BridgeRegistry(db, {
     chatwootBaseUrl: config.CHATWOOT_BASE_URL,
     encryptionKey: config.TOKEN_ENCRYPTION_KEY,

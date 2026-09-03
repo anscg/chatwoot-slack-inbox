@@ -34,6 +34,12 @@ const envSchema = z.object({
     .url("CHATWOOT_BASE_URL must be a URL")
     .transform((u) => u.replace(/\/+$/, "")),
   CHATWOOT_WEBHOOK_SECRET: z.string().trim().min(16, "CHATWOOT_WEBHOOK_SECRET must be at least 16 characters"),
+  /**
+   * Optional Platform App token (self-hosted Chatwoot, /super_admin -> Platform Apps). When set,
+   * an agent's own Chatwoot access token is fetched automatically as they link, so their Slack
+   * replies are attributed to them without an admin pasting a token per person.
+   */
+  CHATWOOT_PLATFORM_TOKEN: z.string().trim().min(1).optional(),
 
   /** Comma-separated Slack user IDs allowed into the control panel. */
   ADMIN_SLACK_USER_IDS: z

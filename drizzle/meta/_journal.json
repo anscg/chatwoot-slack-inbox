@@ -57,6 +57,13 @@
       "when": 1788445918280,
       "tag": "0007_reopen_prompt",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788458317857,
+      "tag": "0008_require_link",
+      "breakpoints": true
     }
   ]
 }

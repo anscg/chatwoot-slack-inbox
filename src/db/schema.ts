@@ -38,6 +38,10 @@ export const bridges = pgTable(
     reopenMessage: text("reopen_message"),
     /** Private prompt shown to someone whose reply reopened a resolved ticket; null disables. */
     reopenPromptMessage: text("reopen_prompt_message"),
+    /** When on, nothing a Slack user writes is relayed until they have linked their account at /link. */
+    requireLink: boolean("require_link").notNull().default(false),
+    /** Private nudge shown to an unlinked sender whose message was held back; null stays silent. */
+    linkPromptMessage: text("link_prompt_message"),
     enabled: boolean("enabled").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -20,6 +20,8 @@ interface Draft {
   resolveMessage: string;
   reopenMessage: string;
   reopenPromptMessage: string;
+  requireLink: boolean;
+  linkPromptMessage: string;
   enabled: boolean;
 }
 
@@ -41,6 +43,8 @@ const EMPTY: Draft = {
   resolveMessage: "",
   reopenMessage: "",
   reopenPromptMessage: "",
+  requireLink: false,
+  linkPromptMessage: "",
   enabled: true,
 };
 
@@ -68,6 +72,8 @@ function fromBridge(b: Bridge): Draft {
     resolveMessage: b.resolveMessage ?? "",
     reopenMessage: b.reopenMessage ?? "",
     reopenPromptMessage: b.reopenPromptMessage ?? "",
+    requireLink: b.requireLink,
+    linkPromptMessage: b.linkPromptMessage ?? "",
     enabled: b.enabled,
   };
 }
@@ -240,6 +246,11 @@ function CheckPanel({ check, onClose }: { check: BridgeCheck | "loading"; onClos
           />
           <Row ok={b.welcomeMessage} label="Welcome message" detail={b.welcomeMessage ? "set" : "off"} />
           <Row ok={b.reopenPromptMessage} label="Accidental-reopen prompt" detail={b.reopenPromptMessage ? "set" : "off"} />
+          <Row
+            ok={null}
+            label="Linked account required to post"
+            detail={b.requireLink ? (b.linkPromptMessage ? "on — unlinked senders are told privately" : "on — unlinked senders are ignored silently") : "off"}
+          />
           <Row ok={b.resolveMessage && b.reopenMessage} label="Resolved / reopened notices" detail={`${b.resolveMessage ? "resolved set" : "resolved off"}, ${b.reopenMessage ? "reopened set" : "reopened off"}`} />
         </tbody>
       </table>
@@ -358,6 +369,8 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
       resolveMessage: d.resolveMessage,
       reopenMessage: d.reopenMessage,
       reopenPromptMessage: d.reopenPromptMessage,
+      requireLink: d.requireLink,
+      linkPromptMessage: d.linkPromptMessage,
       enabled: d.enabled,
     };
     try {
@@ -541,6 +554,26 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
         <div className="field">
           <label>Reopened message (replaces the resolved message)</label>
           <textarea rows={2} value={d.reopenMessage} onChange={set("reopenMessage")} />
+        </div>
+        <div className="field" style={{ gridColumn: "1 / -1" }}>
+          <label>
+            <input
+              type="checkbox"
+              style={{ width: "auto", marginRight: 6 }}
+              checked={d.requireLink}
+              onChange={(e) => setD((x) => ({ ...x, requireLink: e.target.checked }))}
+            />
+            Require a linked Slack account before anything is relayed
+          </label>
+          <p className="note">
+            Off by default. While on, nothing anyone posts in this channel reaches Chatwoot until they have been through <code>{me.publicUrl}/link</code> — there
+            is no anonymous route.
+          </p>
+          <label>Private notice for an unlinked sender (blank = say nothing)</label>
+          <textarea rows={2} value={d.linkPromptMessage} onChange={set("linkPromptMessage")} placeholder={me.defaults.linkPromptMessage} />
+          <p className="note">
+            <code>{"{link}"}</code> is replaced with the link URL. Only that person sees it.
+          </p>
         </div>
         <div className="field" style={{ gridColumn: "1 / -1" }}>
           <label>Private prompt when someone's reply reopens a resolved ticket (blank = off)</label>

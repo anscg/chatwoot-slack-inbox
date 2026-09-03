@@ -11,3 +11,9 @@ export const DEFAULT_REOPEN_PROMPT =
   "Your message reopened this help ticket. Do you have a question, or is it accidental?";
 export const REOPEN_PROMPT_ACCIDENTAL_LABEL = "No, I don't have a question";
 export const REOPEN_PROMPT_KEEP_LABEL = "I have a question, reopen";
+
+/**
+ * Shown privately to someone whose message was held back because this bridge requires a linked
+ * Slack account. `{link}` is replaced with the /link URL; blank keeps the hold-back silent.
+ */
+export const DEFAULT_LINK_PROMPT = "Before you can post here, link your Slack account: {link}";

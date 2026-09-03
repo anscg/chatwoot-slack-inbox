@@ -60,7 +60,21 @@ Every agent should visit `${PUBLIC_URL}/link` once (admins get linked automatica
 
 If an agent replies before linking, the message still reaches Slack (posted by the bridge's bot with the agent's name and avatar) and the agent gets a private note in the conversation pointing them to `/link`.
 
-For the other direction — Slack replies attributed to them in Chatwoot — an admin attaches the agent's Chatwoot access token on the panel's *Agents* page. Without it, their replies are posted by the service agent with their name prefixed.
+For the other direction — Slack replies attributed to them in Chatwoot — the bridge needs that agent's own Chatwoot access token. Without one their replies go out under the bridge's service agent (so they wear *its* name and avatar) with their name prefixed into the text.
+
+Set `CHATWOOT_PLATFORM_TOKEN` and the bridge fetches each token itself, at `/link` and again on an agent's first reply if they linked before you configured it. Two one-off steps on a self-hosted Chatwoot:
+
+1. `/super_admin` → *Platform Apps* → new app (any name); copy its access token into `CHATWOOT_PLATFORM_TOKEN`.
+2. A platform app may only read users it created, so grant it the ones you already have, from `bundle exec rails c`:
+
+   ```ruby
+   app = PlatformApp.find_by(name: 'slack-bridge')
+   User.find_each { |u| PlatformAppPermissible.find_or_create_by!(platform_app: app, permissible: u) }
+   ```
+
+   Re-run it after adding agents to Chatwoot, or the bridge falls back to the service agent for them.
+
+Chatwoot Cloud has no super admin console, so there it stays manual: an admin attaches the agent's access token on the panel's *Agents* page.
 
 ## How it behaves
 
@@ -72,6 +86,7 @@ For the other direction — Slack replies attributed to them in Chatwoot — an 
 - The welcome message and the resolved/reopened notices carry a button that the asker or any linked agent can click: **Resolve** while the conversation is open, **Reopen** once it is resolved. It is re-labelled whenever Chatwoot reports a status change, both labels are configurable, and either can be blanked to hide the button in that state. Anyone else who clicks gets a private in-thread note explaining why not. The button needs Interactivity enabled on the bridge's Slack app, at the same request URL as its events.
 - The bridge bot posts a welcome message in each new thread, a "resolved" notice when the conversation is resolved (from Slack or Chatwoot), and swaps it for a "reopened" notice if the conversation reopens. All three texts are per-bridge settings; blank disables.
 - If the question is deleted in Slack, bridging for that thread stops: no welcome message, no further relaying either way, and the Chatwoot agents get a private note saying so. Slack leaves a tombstone parent behind, so if only the bridge's own messages are still under it they are removed as well; anything a person wrote is left alone. Slack does not reject a reply whose parent is gone, it posts it to the channel instead, so every threaded post is checked and any stray channel message is removed.
+- A bridge can require a linked Slack account before it relays anything (off by default, per bridge). While it is on, no message from anyone who has not been through `/link` reaches Chatwoot — no thread, no contact, no anonymous route — and the sender gets a private in-thread notice pointing them at the link URL, or nothing at all if that text is blanked.
 - Replies in threads that predate the bridge are ignored. Replies from someone other than the original poster are prefixed `**[Not OP] Name:**`.
 - Chatwoot reopens resolved conversations itself when the contact writes again. When that happens the bridge asks the sender privately, in the thread, whether they meant to: a green button resolves it again, a red one keeps it open for a helper. Only they can see or answer it, and the text is a per-bridge setting.
 - Contacts carry the Slack display name and avatar; both are refreshed on every new thread. Chatwoot also looks up Gravatar for contacts with an email, so on a self-hosted Chatwoot set `DISABLE_GRAVATAR=true` if you want Slack avatars to be the only source.

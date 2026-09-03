@@ -1,13 +1,13 @@
 import type { App } from "@slack/bolt";
+import { agentChatwootToken } from "../agents.js";
 import type { Bridge } from "../bridges.js";
 import { ChatwootHttpError } from "../chatwoot/client.js";
 import type { AppContext } from "../context.js";
 import { describeSlackRequest, recordTraffic } from "../diagnostics.js";
-import { decryptToken } from "../crypto.js";
 import type { Agent, Thread } from "../db/schema.js";
 import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
-import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, markThreadDeleted, recordRelayed, setWelcomeMessageTs } from "../store.js";
+import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, hasLinkedSlackAccount, insertThread, isRelayedSlack, markEventSeen, markThreadDeleted, recordRelayed, setWelcomeMessageTs } from "../store.js";
 import { downloadSlackFiles, type SlackFileRef } from "./files.js";
 import { buttonForStatus, KEEP_OPEN_ACTION_ID, messageBlocks, NOT_A_QUESTION_ACTION_ID, parseButtonValue, reopenPromptBlocks, RESOLVE_ACTION_ID, type ButtonAction } from "./blocks.js";
 import { BRIDGE_METADATA_EVENT, deleteBridgeOnlyThread, postEphemeralInThread, postSystemMessage } from "./post.js";
@@ -17,6 +17,7 @@ import { getSlackProfile, messageStillExists } from "./users.js";
 export const JOB_SLACK_MESSAGE = "slack_message";
 export const JOB_SLACK_REACTION = "slack_reaction";
 export const JOB_THREAD_DELETED = "slack_thread_deleted";
+export const JOB_LINK_REQUIRED = "slack_link_required";
 
 /** The subset of a Slack message event we persist into the retry payload. */
 export interface SlackMessageJob extends Record<string, unknown> {
@@ -70,6 +71,14 @@ export interface ThreadDeletedJob extends Record<string, unknown> {
   ts: string;
 }
 
+/** Tell an unlinked sender, privately, why their message went nowhere. */
+export interface LinkRequiredJob extends Record<string, unknown> {
+  channel: string;
+  /** Thread to put the private notice in: the message's own ts when it started one. */
+  threadTs: string;
+  user: string;
+}
+
 export interface IncomingSlackReaction {
   type: "reaction_added";
   user: string;
@@ -104,6 +113,16 @@ export async function acceptSlackMessage(ctx: AppContext, eventId: string, msg: 
   if (msg.metadata?.event_type === BRIDGE_METADATA_EVENT) return "bridge-posted message";
   if (!msg.user) return "no user";
   if (!(await markEventSeen(ctx.db, eventId))) return "duplicate event";
+  // Bridges that require a linked account relay nothing from anyone who has not been through
+  // /link. There is no anonymous route in that case; the sender is told privately instead.
+  if (bridge.row.requireLink && !(await hasLinkedSlackAccount(ctx.db, msg.user))) {
+    void ctx.retry.runOrEnqueue(JOB_LINK_REQUIRED, {
+      channel: msg.channel,
+      threadTs: msg.thread_ts ?? msg.ts,
+      user: msg.user,
+    } satisfies LinkRequiredJob);
+    return "sender has not linked their slack account";
+  }
   if (await isRelayedSlack(ctx.db, msg.channel, msg.ts)) return "already relayed";
   if (msg.files?.length && (await allFilesRelayed(ctx.db, msg.files.map((f) => f.id)))) return "bridge-uploaded files";
 
@@ -189,10 +208,6 @@ export async function acceptResolveButton(ctx: AppContext, click: ResolveButtonC
   return null;
 }
 
-function agentToken(ctx: AppContext, agent: Agent | undefined): string | undefined {
-  return agent?.chatwootApiTokenEnc ? decryptToken(agent.chatwootApiTokenEnc, ctx.config.TOKEN_ENCRYPTION_KEY) : undefined;
-}
-
 function permanentIf4xx(err: unknown): never {
   if (err instanceof ChatwootHttpError && err.permanent) throw new PermanentError(err.message);
   throw err;
@@ -221,6 +236,16 @@ export async function noteThreadDeleted(ctx: AppContext, job: ThreadDeletedJob):
     { private: true },
   );
   log.info("thread parent deleted", { bridge: bridge.row.name, conversationId: thread.chatwootConversationId, channel: job.channel, ts: job.ts });
+}
+
+/** Private nudge to someone whose message was held back for want of a linked account. */
+export async function noteLinkRequired(ctx: AppContext, job: LinkRequiredJob): Promise<void> {
+  const bridge = ctx.bridges.forChannel(job.channel);
+  if (!bridge) throw new PermanentError(`no bridge for channel ${job.channel}`);
+  const prompt = bridge.row.linkPromptMessage;
+  if (!prompt) return; // the admin turned the notice off; the message is still held back
+  const text = prompt.replaceAll("{link}", `${ctx.config.PUBLIC_URL}/link`);
+  await postEphemeralInThread(bridge, job.channel, job.threadTs, job.user, text);
 }
 
 /** Relay one Slack message into Chatwoot. Idempotent: safe to run again from the retry queue. */
@@ -305,7 +330,7 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, g
     let messageId: number;
     if (agent?.chatwootAgentId) {
       // Linked agent: outgoing message attributed to them via their own API token.
-      const apiToken = agentToken(ctx, agent);
+      const apiToken = await agentChatwootToken(ctx, agent);
       const content = apiToken ? text : `**${author.name}:** ${text}`; // no token -> service agent posts, so name them
       const message = await chatwoot.createAgentMessage(thread.chatwootConversationId, content, { apiToken, attachments });
       messageId = message.id;
@@ -340,20 +365,21 @@ export async function applySlackReaction(ctx: AppContext, job: SlackReactionJob)
   const thread = await findThreadBySlack(ctx.db, job.channel, job.ts);
   if (!thread) throw new PermanentError("thread vanished");
   const agent = await findAgentBySlackUser(ctx.db, job.user);
+  const apiToken = await agentChatwootToken(ctx, agent);
 
   try {
     if (job.action === "assign") {
       if (!agent?.chatwootAgentId) throw new PermanentError("assign by non-agent");
-      await bridge.chatwoot.assignConversation(thread.chatwootConversationId, agent.chatwootAgentId, agentToken(ctx, agent));
+      await bridge.chatwoot.assignConversation(thread.chatwootConversationId, agent.chatwootAgentId, apiToken);
       log.info("assigned conversation", { bridge: bridge.row.name, conversationId: thread.chatwootConversationId, agentId: agent.chatwootAgentId });
       return;
     }
     if (job.action === "reopen") {
-      await reopenConversation(bridge, thread, agent, agentToken(ctx, agent));
+      await reopenConversation(bridge, thread, agent, apiToken);
       log.info("reopened conversation", { bridge: bridge.row.name, conversationId: thread.chatwootConversationId, by: job.user, via: job.via ?? "button" });
       return;
     }
-    await resolveConversation(bridge, thread, agent, agentToken(ctx, agent));
+    await resolveConversation(bridge, thread, agent, apiToken);
     log.info("resolved conversation", { bridge: bridge.row.name, conversationId: thread.chatwootConversationId, by: job.user, via: job.via ?? "reaction" });
   } catch (err) {
     permanentIf4xx(err);
@@ -390,6 +416,7 @@ export function registerSlackJobs(ctx: AppContext): void {
   ctx.retry.register(JOB_SLACK_MESSAGE, (payload) => relaySlackMessage(ctx, payload as SlackMessageJob));
   ctx.retry.register(JOB_SLACK_REACTION, (payload) => applySlackReaction(ctx, payload as SlackReactionJob));
   ctx.retry.register(JOB_THREAD_DELETED, (payload) => noteThreadDeleted(ctx, payload as ThreadDeletedJob));
+  ctx.retry.register(JOB_LINK_REQUIRED, (payload) => noteLinkRequired(ctx, payload as LinkRequiredJob));
 }
 
 /** Attach listeners to one bridge's Bolt app. Events are still validated against the channel mapping. */
