@@ -46,3 +46,36 @@ export function slugify(name: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 40);
 }
+
+/** Manifest for the single hub app: admin sign-in, /link, user lookups. Contains no secrets. */
+export function hubManifest(opts: { publicUrl: string; name?: string }): string {
+  const name = (opts.name ?? "Chatwoot Inbox Bridge").slice(0, 35);
+  return `# Hub app for chatwoot-slack-inbox: admin sign-in, agent linking, user lookups.
+# Each bridged channel gets its own Slack app; the control panel generates those.
+display_information:
+  name: ${yaml(name)}
+  description: ${yaml("Sign-in and account linking for the Chatwoot Slack inbox bridge. Unofficial.")}
+  background_color: "#1f93ff"
+features:
+  bot_user:
+    display_name: ${yaml(name)}
+    always_online: false
+oauth_config:
+  redirect_urls:
+    - ${opts.publicUrl}/link/callback
+    - ${opts.publicUrl}/admin/callback
+  scopes:
+    user:
+      - chat:write
+      - openid
+      - email
+      - profile
+    bot:
+      - users:read
+      - users:read.email
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
+`;
+}

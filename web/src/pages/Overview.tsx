@@ -29,6 +29,9 @@ export function Overview({ me }: { me: Me }) {
           them in Chatwoot.
         </p>
         {data && <Copy value={data.linkUrl} />}
+        <p style={{ marginTop: 16 }}>
+          <strong>Hub Slack app.</strong> Setting up another instance, or rotating the hub app? The pre-filled manifest is at <a href="/setup">/setup</a> (no sign-in needed).
+        </p>
         <p className="note" style={{ marginTop: 16 }}>
           Chatwoot: <a href={me.chatwootBaseUrl}>{me.chatwootBaseUrl}</a> · Public URL: <code>{me.publicUrl}</code>
         </p>

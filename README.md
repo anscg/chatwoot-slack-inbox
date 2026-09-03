@@ -24,13 +24,13 @@ Requirements: a public HTTPS URL for this service, Node 22+ and Postgres (or Doc
 
 There are two kinds of Slack app: one **hub** app (sign-in, agent linking, user lookups — never posts) and one **bridge** app per event/team (the bot people see in the channel).
 
-1. **Create the hub Slack app.** At <https://api.slack.com/apps> choose *Create New App → From a manifest*, paste [`slack-manifest-hub.yml`](slack-manifest-hub.yml) with `bridge.example.com` replaced by your host, and install it to the workspace.
-2. **Configure and run.**
+1. **Run it once with placeholder Slack credentials** so it can hand you a pre-filled manifest:
    ```bash
-   cp .env.example .env   # hub app credentials, CHATWOOT_BASE_URL, PUBLIC_URL, ADMIN_SLACK_USER_IDS, DATABASE_URL
+   cp .env.example .env   # CHATWOOT_BASE_URL, PUBLIC_URL, ADMIN_SLACK_USER_IDS, DATABASE_URL, secrets; leave SLACK_* as the placeholders
    npm install && npm run build && npm start
    ```
    Or with Docker: `docker compose up -d --build` (runs Postgres too). Migrations run on boot. `GET /healthz` returns `{"ok":true}`.
+2. **Create the hub Slack app.** Open `${PUBLIC_URL}/setup` (no sign-in) and download the hub manifest, pre-filled with your redirect URLs — or use [`slack-manifest-hub.yml`](slack-manifest-hub.yml) and replace `bridge.example.com`. At <https://api.slack.com/apps> choose *Create New App → From a manifest*, install it, then put its bot token, client ID and client secret into `.env` and restart.
 3. **Create a Chatwoot API inbox** for the event/team: *Settings → Inboxes → Add inbox → API*.
 4. **Open the control panel** at `${PUBLIC_URL}/admin/`, sign in with Slack, click *New bridge*. The form walks through it: name → copy the generated manifest and create that team's Slack app from it → paste its bot token + signing secret → pick the channel (invite the bot first) → paste a Chatwoot *service agent* access token (Profile settings → Access token), pick the account and API inbox → choose or disable the ✅/👀 reactions.
 5. **Add the Chatwoot webhook** in each bridged account: *Settings → Integrations → Webhooks*, URL shown on the panel's Overview page (`${PUBLIC_URL}/webhooks/chatwoot/<secret>`), event `message_created`.

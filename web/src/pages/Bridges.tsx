@@ -256,13 +256,14 @@ function BridgeForm({ bridge, onDone, onCancel }: { bridge: Bridge | null; onDon
         <div className="field">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <label style={{ margin: 0 }}>Manifest</label>
-            <button
-              type="button"
-              className="small"
-              onClick={() => void navigator.clipboard.writeText(manifest)}
-            >
-              Copy manifest
-            </button>
+            <span className="row">
+              <a className="btn small" href={`/admin/api/manifest?${new URLSearchParams({ name: d.name || "Support Bridge", slug: d.slug, download: "1" })}`} download>
+                Download
+              </a>
+              <button type="button" className="small" onClick={() => void navigator.clipboard.writeText(manifest)}>
+                Copy
+              </button>
+            </span>
           </div>
           <pre className="manifest">{manifest}</pre>
         </div>

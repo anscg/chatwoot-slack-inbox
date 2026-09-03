@@ -113,7 +113,9 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
     const name = String(req.query.name ?? "").trim() || "Support Bridge";
     const slug = String(req.query.slug ?? "").trim() || slugify(name);
     if (!SLUG_RE.test(slug)) return badRequest(res, "invalid slug");
-    res.type("text/yaml").send(bridgeManifest({ name, slug, publicUrl: config.PUBLIC_URL }));
+    res.type("text/yaml");
+    if (req.query.download) res.attachment(`${slug}.slack-manifest.yml`);
+    res.send(bridgeManifest({ name, slug, publicUrl: config.PUBLIC_URL }));
   });
 
   api.post(

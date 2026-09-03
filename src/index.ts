@@ -11,6 +11,7 @@ import { log, setLogLevel } from "./logger.js";
 import { RetryQueue } from "./retry.js";
 import { registerSlackEvents, registerSlackJobs } from "./slack/events.js";
 import { registerSlackOAuth } from "./slack/oauth.js";
+import { registerSetupRoutes } from "./setup.js";
 import { pruneSeenEvents } from "./store.js";
 
 async function main(): Promise<void> {
@@ -23,7 +24,14 @@ async function main(): Promise<void> {
 
   // Hub app: admin sign-in, /link, user lookups. Bridges each bring their own bot.
   const hub = new WebClient(config.SLACK_BOT_TOKEN, { retryConfig: { retries: 2 } });
-  const hubAuth = await hub.auth.test();
+  // Not fatal: on a fresh install the hub app doesn't exist yet, and /setup hands out its manifest.
+  const hubAuth = await hub.auth.test().catch((err: unknown) => {
+    log.warn("hub Slack app not usable yet; sign-in and /link will fail until SLACK_* are set", {
+      setupUrl: `${config.PUBLIC_URL}/setup`,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { user_id: undefined as string | undefined };
+  });
 
   const retry = new RetryQueue(db);
   // `ctx.bridges` is assigned right after; handlers only touch it at event time.
@@ -36,7 +44,7 @@ async function main(): Promise<void> {
   ctx.bridges = bridges;
   await bridges.reload();
   bridges.startAutoRefresh();
-  if (bridges.all().length === 0) log.warn("no enabled bridges yet; configure one in the control panel", { adminUrl: `${config.PUBLIC_URL}/admin/` });
+  if (bridges.all().length === 0) log.warn("no enabled bridges yet; see setup page", { setupUrl: `${config.PUBLIC_URL}/setup`, adminUrl: `${config.PUBLIC_URL}/admin/` });
 
   registerSlackJobs(ctx);
 
@@ -64,6 +72,7 @@ async function main(): Promise<void> {
   app.use("/webhooks", express.json({ limit: "2mb" }));
   registerChatwootWebhook(app, ctx);
   registerSlackOAuth(app, ctx);
+  registerSetupRoutes(app, config);
   registerAdminApi(app, ctx);
 
   // Control panel SPA (built by `npm run build` into web/dist).
@@ -85,7 +94,7 @@ async function main(): Promise<void> {
     log.info("listening", {
       port: config.PORT,
       publicUrl: config.PUBLIC_URL,
-      hubBot: hubAuth.user_id,
+      hubBot: hubAuth.user_id ?? "(not configured)",
       bridges: bridges.all().map((b) => `${b.row.name} (${b.row.slackChannel} -> account ${b.row.chatwootAccountId}, bot ${b.botUserId})`),
     });
   });
