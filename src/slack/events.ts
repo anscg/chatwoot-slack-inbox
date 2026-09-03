@@ -10,7 +10,7 @@ import { PermanentError } from "../retry.js";
 import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, markThreadDeleted, recordRelayed, setWelcomeMessageTs } from "../store.js";
 import { downloadSlackFiles, type SlackFileRef } from "./files.js";
 import { buttonForStatus, parseButtonValue, RESOLVE_ACTION_ID, messageBlocks, type ButtonAction } from "./blocks.js";
-import { BRIDGE_METADATA_EVENT, postEphemeralInThread, postSystemMessage } from "./post.js";
+import { BRIDGE_METADATA_EVENT, deleteBridgeOnlyThread, postEphemeralInThread, postSystemMessage } from "./post.js";
 import { slackToChatwootText } from "./text.js";
 import { getSlackProfile, messageStillExists } from "./users.js";
 
@@ -204,12 +204,17 @@ function permanentIf4xx(err: unknown): never {
  */
 export const SLACK_ECHO_GRACE_MS = 1500;
 
-/** Tell the Chatwoot agents, privately, that the Slack thread is gone. */
+/** Clean up the orphaned thread in Slack, then tell the Chatwoot agents privately what happened. */
 export async function noteThreadDeleted(ctx: AppContext, job: ThreadDeletedJob): Promise<void> {
   const bridge = ctx.bridges.forChannel(job.channel);
   if (!bridge) throw new PermanentError(`no bridge for channel ${job.channel}`);
   const thread = await findThreadBySlack(ctx.db, job.channel, job.ts);
   if (!thread) return;
+  const removed = await deleteBridgeOnlyThread(bridge, job.channel, job.ts).catch((err) => {
+    log.warn("could not tidy up the orphaned thread", { channel: job.channel, ts: job.ts, error: err instanceof Error ? err.message : String(err) });
+    return 0;
+  });
+  if (removed) log.info("removed the bridge's own messages from a deleted thread", { channel: job.channel, ts: job.ts, removed });
   await bridge.chatwoot.createAgentMessage(
     thread.chatwootConversationId,
     "_The Slack message that started this conversation was deleted. Nothing further will be relayed to Slack._",

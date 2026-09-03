@@ -280,6 +280,44 @@ export async function postEphemeralInThread(bridge: Bridge, channel: string, thr
   await bridge.slack.chat.postEphemeral({ channel, thread_ts: threadTs, user, text });
 }
 
+interface ReplyRef {
+  ts?: string;
+  user?: string;
+  bot_id?: string;
+  subtype?: string;
+}
+
+/**
+ * After a thread's question is deleted, Slack keeps the thread alive with a "This message was
+ * deleted" tombstone as its parent, leaving our welcome message stranded under it. If nothing but
+ * the bridge's own messages remain, take them down too; the tombstone disappears on its own once
+ * the last reply is gone. Anything a person wrote is left untouched, and its presence cancels the
+ * cleanup entirely.
+ */
+export async function deleteBridgeOnlyThread(bridge: Bridge, channel: string, threadTs: string): Promise<number> {
+  let messages: ReplyRef[];
+  try {
+    const res = await bridge.slack.conversations.replies({ channel, ts: threadTs, limit: 200 });
+    messages = (res.messages ?? []) as ReplyRef[];
+  } catch (err) {
+    const code = (err as { data?: { error?: string } })?.data?.error;
+    if (code === "thread_not_found" || code === "message_not_found" || code === "channel_not_found") return 0;
+    throw err;
+  }
+
+  const remaining = messages.filter((m) => m.ts && m.ts !== threadTs && m.subtype !== "tombstone");
+  if (remaining.length === 0) return 0;
+  const isOurs = (m: ReplyRef) => m.bot_id === bridge.botId || m.user === bridge.botUserId;
+  if (!remaining.every(isOurs)) return 0;
+
+  let deleted = 0;
+  for (const m of remaining) {
+    await deleteSystemMessage(bridge, channel, m.ts!);
+    deleted += 1;
+  }
+  return deleted;
+}
+
 /** Delete one of our own messages; a missing message is not an error. */
 export async function deleteSystemMessage(bridge: Bridge, channel: string, ts: string): Promise<void> {
   try {

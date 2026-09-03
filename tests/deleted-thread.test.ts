@@ -37,6 +37,45 @@ describe("a deleted question", () => {
     expect(await acceptSlackMessage(ctx, "Ev3", deletion())).toBe("thread already marked deleted");
   });
 
+  it("takes its own leftover messages down when nothing human remains", async () => {
+    const ctx = await setup();
+    await acceptSlackMessage(ctx, "Ev1", post());
+    await flush();
+    // Slack keeps a tombstone parent plus our stranded welcome message.
+    ctx.slackMock.conversations.replies.mockResolvedValueOnce({
+      ok: true,
+      messages: [
+        { ts: PARENT, subtype: "tombstone" },
+        { ts: "1700000000.000150", bot_id: "B_OURS", text: "Hi there" },
+      ],
+    });
+
+    await acceptSlackMessage(ctx, "Ev2", deletion());
+    await flush();
+
+    expect(ctx.slackMock.chat.delete).toHaveBeenCalledWith({ channel: "C_HELP", ts: "1700000000.000150" });
+    expect(ctx.slackMock.chat.delete).toHaveBeenCalledTimes(1); // never the tombstone, which is not ours
+  });
+
+  it("leaves the thread alone when a person has replied", async () => {
+    const ctx = await setup();
+    await acceptSlackMessage(ctx, "Ev1", post());
+    await flush();
+    ctx.slackMock.conversations.replies.mockResolvedValueOnce({
+      ok: true,
+      messages: [
+        { ts: PARENT, subtype: "tombstone" },
+        { ts: "1700000000.000150", bot_id: "B_OURS", text: "Hi there" },
+        { ts: "1700000000.000160", user: "U_CAROL", text: "I had this too" },
+      ],
+    });
+
+    await acceptSlackMessage(ctx, "Ev2", deletion());
+    await flush();
+
+    expect(ctx.slackMock.chat.delete).not.toHaveBeenCalled();
+  });
+
   it("ignores later replies in Slack and later agent replies from Chatwoot", async () => {
     const ctx = await setup();
     await acceptSlackMessage(ctx, "Ev1", post());
@@ -96,6 +135,34 @@ describe("a deleted question", () => {
     await relaySlackMessage(ctx, { channel: "C_HELP", ts: PARENT, user: "U_ALICE", text: "help me" }, 0);
     expect(ctx.slackMock.chat.postMessage).toHaveBeenCalledTimes(1);
     expect(ctx.slackMock.conversations.history).toHaveBeenCalledWith({ channel: "C_HELP", latest: PARENT, oldest: PARENT, inclusive: true, limit: 1 });
+  });
+});
+
+describe("a status change racing the deletion event", () => {
+  it("does not retry when the notice leaks into the channel", async () => {
+    const ctx = await setup();
+    await ctx.db.insert(threads).values({
+      slackChannel: "C_HELP",
+      slackThreadTs: PARENT,
+      chatwootAccountId: 1,
+      chatwootConversationId: 42,
+      chatwootContactSourceId: "src-U_ALICE",
+      slackAuthorId: "U_ALICE",
+      welcomeMessageTs: "1700000000.000150",
+    });
+    // The deletion event has not reached us, so the thread still looks alive; Slack answers with an
+    // unthreaded message, meaning the notice landed in the channel.
+    ctx.slackMock.chat.postMessage.mockResolvedValueOnce({ ok: true, ts: "1700000000.000900", message: { text: "resolved" } });
+
+    await applyChatwootStatus(ctx, { conversationId: 42, status: "resolved", accountId: 1 });
+
+    expect(ctx.slackMock.chat.delete).toHaveBeenCalledWith({ channel: "C_HELP", ts: "1700000000.000900" });
+    expect((await ctx.db.select().from(threads))[0]!.deletedAt).toBeInstanceOf(Date);
+    expect(await ctx.db.select().from((await import("../src/db/schema.js")).retries)).toHaveLength(0);
+    // And a second delivery does nothing at all.
+    ctx.slackMock.chat.postMessage.mockClear();
+    await applyChatwootStatus(ctx, { conversationId: 42, status: "open", accountId: 1 });
+    expect(ctx.slackMock.chat.postMessage).not.toHaveBeenCalled();
   });
 });
 

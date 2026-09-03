@@ -238,7 +238,16 @@ export async function applyChatwootStatus(ctx: AppContext, job: ChatwootStatusJo
       statusMessageTs = null;
     }
     if (text) {
-      statusMessageTs = await postSystemMessage(bridge, thread.slackChannel, thread.slackThreadTs, text, messageBlocks(text, thread.slackThreadTs, button));
+      try {
+        statusMessageTs = await postSystemMessage(bridge, thread.slackChannel, thread.slackThreadTs, text, messageBlocks(text, thread.slackThreadTs, button));
+      } catch (err) {
+        if (!(err instanceof ThreadGone)) throw err;
+        // The question was deleted and we have not seen the event yet. Retrying would post and
+        // withdraw a channel message once per attempt, so stop here instead.
+        await markThreadDeleted(ctx.db, thread.id);
+        log.warn("slack thread is gone; marking it deleted instead of retrying the notice", { conversationId: job.conversationId, channel: thread.slackChannel });
+        return;
+      }
     }
   }
   await setThreadStatus(ctx.db, thread.id, { lastStatus: job.status, statusMessageTs });
