@@ -68,10 +68,12 @@ export interface MockSlack {
     delete: ReturnType<typeof vi.fn>;
   };
   files: { uploadV2: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
+  reactions: { add: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> };
 }
 
 export function mockSlack(): MockSlack {
   return {
+    reactions: { add: vi.fn(async () => ({ ok: true })), remove: vi.fn(async () => ({ ok: true })) },
     files: {
       uploadV2: vi.fn(async () => ({ ok: true, files: [{ files: [{ id: "F_BOT1" }] }] })),
       info: vi.fn(async () => ({ ok: true, file: { shares: { public: { C_HELP: [{ ts: "1700000000.000700" }] } } } })),
@@ -107,6 +109,7 @@ export interface BridgeOverrides {
   accountId?: number;
   reactionResolve?: string | null;
   reactionAssign?: string | null;
+  resolvedEmoji?: string | null;
   welcomeMessage?: string | null;
   resolveButtonLabel?: string | null;
   reopenButtonLabel?: string | null;
@@ -158,6 +161,7 @@ export async function addBridge(ctx: TestContext, over: BridgeOverrides, chatwoo
     chatwootApiTokenEnc: encryptToken("service-token", TEST_KEY),
     reactionResolve: over.reactionResolve === undefined ? "white_check_mark" : over.reactionResolve,
     reactionAssign: over.reactionAssign === undefined ? "eyes" : over.reactionAssign,
+    resolvedEmoji: over.resolvedEmoji === undefined ? "white_check_mark" : over.resolvedEmoji,
   });
   await ctx.bridges.reload();
   // Swap the real client for the mock so nothing hits the network.

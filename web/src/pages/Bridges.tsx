@@ -13,6 +13,7 @@ interface Draft {
   chatwootApiToken: string;
   reactionResolve: string;
   reactionAssign: string;
+  resolvedEmoji: string;
   welcomeMessage: string;
   resolveButtonLabel: string;
   reopenButtonLabel: string;
@@ -32,6 +33,7 @@ const EMPTY: Draft = {
   chatwootApiToken: "",
   reactionResolve: "white_check_mark",
   reactionAssign: "eyes",
+  resolvedEmoji: "white_check_mark",
   welcomeMessage: "",
   resolveButtonLabel: "",
   reopenButtonLabel: "",
@@ -57,6 +59,7 @@ function fromBridge(b: Bridge): Draft {
     chatwootInboxIdentifier: b.chatwootInboxIdentifier,
     reactionResolve: b.reactionResolve ?? "",
     reactionAssign: b.reactionAssign ?? "",
+    resolvedEmoji: b.resolvedEmoji ?? "",
     welcomeMessage: b.welcomeMessage ?? "",
     resolveButtonLabel: b.resolveButtonLabel ?? "",
     reopenButtonLabel: b.reopenButtonLabel ?? "",
@@ -116,6 +119,8 @@ export function Bridges({ me }: { me: Me }) {
                     <span className="muted mono">{b.chatwootInboxIdentifier}</span>
                   </td>
                   <td>
+                    stamp: {b.resolvedEmoji ? <code>:{b.resolvedEmoji}:</code> : <span className="pill off">off</span>}
+                    <br />
                     resolve: {b.reactionResolve ? <code>:{b.reactionResolve}:</code> : <span className="pill off">off</span>}
                     <br />
                     assign: {b.reactionAssign ? <code>:{b.reactionAssign}:</code> : <span className="pill off">off</span>}
@@ -219,7 +224,8 @@ function CheckPanel({ check, onClose }: { check: BridgeCheck | "loading"; onClos
           />
           <Row ok={check.chatwoot?.ok ?? null} label="Chatwoot service token" detail={check.chatwoot?.error ? <span className="err">{check.chatwoot.error}</span> : `account ${check.chatwoot?.accountId}, ${check.chatwoot?.agents} agents`} />
           <Row ok={check.threads > 0} label="Threads bridged so far" detail={String(check.threads)} />
-          <Row ok={Boolean(b.reactionResolve)} label="Resolve reaction" detail={b.reactionResolve ? `:${b.reactionResolve}: — react on the first message of the thread, not on a reply` : "off"} />
+          <Row ok={Boolean(b.resolvedEmoji)} label="Bot stamps when resolved" detail={b.resolvedEmoji ? `:${b.resolvedEmoji}: on the question, removed when reopened` : "off"} />
+          <Row ok={Boolean(b.reactionResolve)} label="Reaction that resolves" detail={b.reactionResolve ? `:${b.reactionResolve}: — react on the first message of the thread, not on a reply` : "off"} />
           <Row
             ok={Boolean(b.resolveButtonLabel)}
             label="Thread button"
@@ -341,6 +347,7 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
       ...(d.chatwootApiToken ? { chatwootApiToken: d.chatwootApiToken } : {}),
       reactionResolve: d.reactionResolve,
       reactionAssign: d.reactionAssign,
+      resolvedEmoji: d.resolvedEmoji,
       welcomeMessage: d.welcomeMessage,
       resolveButtonLabel: d.resolveButtonLabel,
       reopenButtonLabel: d.reopenButtonLabel,
@@ -485,12 +492,18 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
 
       <h3 className="step">4. Behaviour</h3>
       <div className="form-grid">
-        <div className="field">
-          <label>Resolve reaction (emoji name, blank = off)</label>
-          <input value={d.reactionResolve} onChange={set("reactionResolve")} placeholder="white_check_mark" />
+        <div className="field" style={{ gridColumn: "1 / -1" }}>
+          <label>Emoji the bot adds to the question once resolved, and removes when reopened (blank = off)</label>
+          <input value={d.resolvedEmoji} onChange={set("resolvedEmoji")} placeholder="white_check_mark" />
+          <p className="note">Marks finished threads in the channel list. Custom emoji are fine; give the name without colons.</p>
         </div>
         <div className="field">
-          <label>Assign reaction (emoji name, blank = off)</label>
+          <label>Reaction a person can add to resolve (blank = off)</label>
+          <input value={d.reactionResolve} onChange={set("reactionResolve")} placeholder="white_check_mark" />
+          <p className="note">Honoured from the asker or a linked agent, on the first message of the thread. Needs <code>reaction_added</code> subscribed.</p>
+        </div>
+        <div className="field">
+          <label>Reaction a linked agent can add to assign it to themselves (blank = off)</label>
           <input value={d.reactionAssign} onChange={set("reactionAssign")} placeholder="eyes" />
         </div>
         <div className="field">

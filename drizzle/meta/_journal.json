@@ -36,6 +36,13 @@
       "when": 1788439696856,
       "tag": "0004_reopen_button",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788441038424,
+      "tag": "0005_resolved_emoji",
+      "breakpoints": true
     }
   ]
 }

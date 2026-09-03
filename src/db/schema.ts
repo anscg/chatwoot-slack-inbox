@@ -24,9 +24,11 @@ export const bridges = pgTable(
     chatwootInboxId: integer("chatwoot_inbox_id"),
     /** Service-agent access token for this account, used when no per-agent token applies. */
     chatwootApiTokenEnc: text("chatwoot_api_token_enc").notNull(),
-    /** Emoji short names; null disables the reaction. */
+    /** Emoji short names a human can react with to act on a thread; null disables. */
     reactionResolve: text("reaction_resolve"),
     reactionAssign: text("reaction_assign"),
+    /** Emoji the bot itself adds to the question when resolved and removes when reopened; null disables. */
+    resolvedEmoji: text("resolved_emoji"),
     /** Bot messages posted in the Slack thread; null disables each. */
     welcomeMessage: text("welcome_message"),
     /** Labels of the button on the welcome message, by conversation state; null hides it. */

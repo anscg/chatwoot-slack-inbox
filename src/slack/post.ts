@@ -229,6 +229,21 @@ export async function postSystemMessage(bridge: Bridge, channel: string, threadT
   });
 }
 
+/**
+ * Stamp (or unstamp) an emoji on a message as the bridge bot. Slack's "already reacted" and
+ * "no reaction to remove" answers are the desired end state, not failures. Needs `reactions:write`.
+ */
+export async function setBotReaction(bridge: Bridge, channel: string, ts: string, name: string, on: boolean): Promise<void> {
+  try {
+    if (on) await bridge.slack.reactions.add({ channel, timestamp: ts, name });
+    else await bridge.slack.reactions.remove({ channel, timestamp: ts, name });
+  } catch (err) {
+    const code = (err as { data?: { error?: string } })?.data?.error;
+    if (code === "already_reacted" || code === "no_reaction" || code === "message_not_found") return;
+    throw err;
+  }
+}
+
 /** Re-render the welcome message, e.g. to swap its button between Resolve and Reopen. */
 export async function updateSystemMessage(bridge: Bridge, channel: string, ts: string, text: string, blocks: KnownBlock[]): Promise<void> {
   await bridge.slack.chat.update({ channel, ts, text, blocks });

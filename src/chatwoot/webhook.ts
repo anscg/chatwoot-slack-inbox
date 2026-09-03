@@ -4,7 +4,7 @@ import type { AppContext } from "../context.js";
 import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
 import { buttonForStatus, messageBlocks } from "../slack/blocks.js";
-import { deleteSystemMessage, postSystemMessage, postToSlackThread, resolvePostIdentity, SlackUploadUnavailable, updateSystemMessage, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
+import { deleteSystemMessage, postSystemMessage, postToSlackThread, resolvePostIdentity, setBotReaction, SlackUploadUnavailable, updateSystemMessage, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
 import { chatwootToSlackText } from "../slack/text.js";
 import { findThreadByConversation, isRelayedChatwoot, recordRelayed, recordRelayedFiles, setThreadStatus } from "../store.js";
 
@@ -206,6 +206,14 @@ export async function applyChatwootStatus(ctx: AppContext, job: ChatwootStatusJo
   let text: string | null = null;
   if (job.status === "resolved") text = bridge.row.resolveMessage;
   else if (job.status === "open" && thread.lastStatus === "resolved") text = bridge.row.reopenMessage;
+
+  // Stamp the question itself so the channel view shows at a glance which threads are done.
+  // The bot's own reaction is ignored on the way back in, so this cannot trigger a resolve loop.
+  if (bridge.row.resolvedEmoji && (job.status === "resolved" || job.status === "open")) {
+    await setBotReaction(bridge, thread.slackChannel, thread.slackThreadTs, bridge.row.resolvedEmoji, job.status === "resolved").catch((err) =>
+      log.warn("could not set the resolved reaction", { conversationId: job.conversationId, error: err instanceof Error ? err.message : String(err) }),
+    );
+  }
 
   // The button that fits the new state: Reopen once resolved, Resolve once open again. It goes on
   // the notice as well as the welcome message, so whoever is reading the newest message can act.

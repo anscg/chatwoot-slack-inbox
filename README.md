@@ -13,6 +13,7 @@ Chatwoot's official Slack integration goes the other way (it mirrors Chatwoot co
    └ thread reply (user) ───────────────▶     incoming message
    └ thread reply (linked agent) ───────▶     outgoing message, attributed to the agent
    └ ✅ on the parent   ────────────────▶     resolve   (agent or original author only)
+   └ ✅ stamped by the bot ◀───────────────    conversation resolved (removed on reopen)
    └ 👀 on the parent   ────────────────▶     assign to reacting agent
    └ thread reply       ◀───── webhook ────   agent reply, posted from the agent's own
                                               Slack account (agents link once at /link)

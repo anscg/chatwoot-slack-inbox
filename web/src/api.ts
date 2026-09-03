@@ -32,7 +32,7 @@ export interface Me {
   user: { userId: string; name: string };
   chatwootBaseUrl: string;
   publicUrl: string;
-  defaults: { welcomeMessage: string; resolveButtonLabel: string; reopenButtonLabel: string; resolveMessage: string; reopenMessage: string };
+  defaults: { welcomeMessage: string; resolvedEmoji: string; resolveButtonLabel: string; reopenButtonLabel: string; resolveMessage: string; reopenMessage: string };
 }
 export interface Status {
   webhookUrl: string;
@@ -53,6 +53,7 @@ export interface Bridge {
   chatwootInboxIdentifier: string;
   reactionResolve: string | null;
   reactionAssign: string | null;
+  resolvedEmoji: string | null;
   welcomeMessage: string | null;
   resolveButtonLabel: string | null;
   reopenButtonLabel: string | null;
@@ -107,6 +108,7 @@ export interface BridgeCheck {
   behaviour: {
     reactionResolve: string | null;
     reactionAssign: string | null;
+    resolvedEmoji: string | null;
     resolveButtonLabel: string | null;
     reopenButtonLabel: string | null;
     welcomeMessage: boolean;
