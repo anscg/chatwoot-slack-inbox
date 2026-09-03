@@ -19,10 +19,11 @@ export function buttonForStatus(
 }
 
 /**
- * Welcome message, with an optional action button. The value carries both the intent and the thread
- * ts, so a click is unambiguous even if the button is stale.
+ * A bot message with an optional action button, used for both the welcome message and the
+ * resolved/reopened notices. The value carries the intent as well as the thread ts, so a click is
+ * unambiguous even if the button is stale.
  */
-export function welcomeBlocks(text: string, threadTs: string, button: ThreadButton | null): KnownBlock[] {
+export function messageBlocks(text: string, threadTs: string, button: ThreadButton | null): KnownBlock[] {
   const blocks: KnownBlock[] = [{ type: "section", text: { type: "mrkdwn", text } }];
   if (button) {
     blocks.push({

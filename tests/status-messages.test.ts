@@ -31,6 +31,9 @@ describe("status messages", () => {
     const ctx = await setup();
     await applyChatwootStatus(ctx, { conversationId: 42, status: "resolved", inboxId: 11 });
     expect(ctx.slackMock.chat.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ thread_ts: PARENT, text: ":neocat: Help request marked as resolved." }));
+    // The notice itself carries the button for the new state.
+    const notice = ctx.slackMock.chat.postMessage.mock.calls[0]![0] as { blocks: { elements?: { text?: { text?: string }; value?: string }[] }[] };
+    expect(notice.blocks[1]?.elements?.[0]).toMatchObject({ text: { text: "Reopen" }, value: `reopen:${PARENT}` });
     expect(ctx.slackMock.chat.delete).not.toHaveBeenCalled();
     let [t] = await ctx.db.select().from(threads);
     expect(t).toMatchObject({ lastStatus: "resolved", statusMessageTs: "1700000000.000900" });
@@ -48,6 +51,8 @@ describe("status messages", () => {
     await applyChatwootStatus(ctx, { conversationId: 42, status: "open", accountId: 1 });
     expect(ctx.slackMock.chat.delete).toHaveBeenCalledWith({ channel: "C_HELP", ts: "1700000000.000900" });
     expect(ctx.slackMock.chat.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ text: "Thread reopened." }));
+    const reopened = ctx.slackMock.chat.postMessage.mock.calls[1]![0] as { blocks: { elements?: { text?: { text?: string }; value?: string }[] }[] };
+    expect(reopened.blocks[1]?.elements?.[0]).toMatchObject({ text: { text: "Resolve" }, value: `resolve:${PARENT}` });
     [t] = await ctx.db.select().from(threads);
     expect(t).toMatchObject({ lastStatus: "open", statusMessageTs: "1700000000.000901" });
     const back = ctx.slackMock.chat.update.mock.calls[1]![0] as { blocks: { elements?: { text?: { text?: string } }[] }[] };

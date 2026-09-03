@@ -185,12 +185,12 @@ describe("Reopen button", () => {
 
 describe("button values", () => {
   it("round-trip and tolerate the pre-toggle format", async () => {
-    const { buttonForStatus, parseButtonValue, welcomeBlocks } = await import("../src/slack/blocks.js");
+    const { buttonForStatus, parseButtonValue, messageBlocks } = await import("../src/slack/blocks.js");
     const labels = { resolveButtonLabel: "Resolve", reopenButtonLabel: "Reopen" };
     expect(buttonForStatus("open", labels)).toEqual({ label: "Resolve", action: "resolve" });
     expect(buttonForStatus("resolved", labels)).toEqual({ label: "Reopen", action: "reopen" });
     expect(buttonForStatus("resolved", { ...labels, reopenButtonLabel: null })).toBeNull();
-    const blocks = welcomeBlocks("hi", PARENT, buttonForStatus("resolved", labels));
+    const blocks = messageBlocks("hi", PARENT, buttonForStatus("resolved", labels));
     const value = (blocks[1] as { elements: { value: string }[] }).elements[0]!.value;
     expect(parseButtonValue(value)).toEqual({ action: "reopen", threadTs: PARENT });
     expect(parseButtonValue(PARENT)).toEqual({ action: "resolve", threadTs: PARENT }); // old messages

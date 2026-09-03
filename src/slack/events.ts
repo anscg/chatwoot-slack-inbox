@@ -9,7 +9,7 @@ import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
 import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, recordRelayed, setWelcomeMessageTs } from "../store.js";
 import { downloadSlackFiles, type SlackFileRef } from "./files.js";
-import { buttonForStatus, parseButtonValue, RESOLVE_ACTION_ID, welcomeBlocks, type ButtonAction } from "./blocks.js";
+import { buttonForStatus, parseButtonValue, RESOLVE_ACTION_ID, messageBlocks, type ButtonAction } from "./blocks.js";
 import { BRIDGE_METADATA_EVENT, postEphemeralInThread, postSystemMessage } from "./post.js";
 import { slackToChatwootText } from "./text.js";
 import { getSlackProfile } from "./users.js";
@@ -233,7 +233,7 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, g
           log.warn("could not refresh contact avatar", { contactId: contact.id, error: err instanceof Error ? err.message : String(err) });
         });
         if (bridge.row.welcomeMessage) {
-          const blocks = welcomeBlocks(bridge.row.welcomeMessage, job.ts, buttonForStatus("open", bridge.row));
+          const blocks = messageBlocks(bridge.row.welcomeMessage, job.ts, buttonForStatus("open", bridge.row));
           const welcomeTs = await postSystemMessage(bridge, job.channel, job.ts, bridge.row.welcomeMessage, blocks).catch((err) => {
             log.warn("could not post welcome message", { channel: job.channel, ts: job.ts, error: err instanceof Error ? err.message : String(err) });
             return null;
