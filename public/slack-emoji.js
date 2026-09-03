@@ -462,9 +462,6 @@
     var list = popover.querySelector('ul[role="listbox"]');
     var box = popover.querySelector("input");
     if (!list || !box) return;
-    list.style.display = "none";
-    var status = popover.querySelector('[role="status"]');
-    if (status) status.style.display = "none";
 
     var ours = document.createElement("ul");
     ours.className = "cw-slack-rows";
@@ -472,18 +469,18 @@
     list.parentElement.insertBefore(ours, list);
 
     function draw() {
-      paint([]);
       var query = box.value;
-      if (normalise(query)) searchSoon(query, paint);
+      paint([], !normalise(query));
+      if (normalise(query)) searchSoon(query);
     }
 
-    var searchSoon = debounce(function (query, then) {
+    var searchSoon = debounce(function (query) {
       searchCustom(query, TYPEAHEAD_CUSTOM, function (hits) {
-        if (box.value === query) then(hits);
+        if (box.value === query) paint(hits, true);
       });
     });
 
-    function paint(hits) {
+    function paint(hits, settled) {
       var query = box.value;
       shown = hits.concat(searchStandard(query, TYPEAHEAD_STANDARD));
       selected = 0;
@@ -505,8 +502,7 @@
               );
             })
             .join("")
-        : '<li class="cw-slack-note">Searching…</li>';
-      if (status) status.style.display = "none";
+        : '<li class="cw-slack-note">' + (settled ? "No emoji match " + esc(query) : "Searching…") + "</li>";
     }
 
     ours.addEventListener("mousedown", function (e) {
@@ -696,6 +692,9 @@
     ".cw-slack-row-code{margin-inline-start:auto;opacity:.55;font-size:12px}",
     ".cw-slack-row:hover,.cw-slack-row.is-active{background:rgba(127,127,127,.22)}",
     ".cw-slack-inline{display:inline-block;width:1.35em;height:1.35em;object-fit:contain;vertical-align:-0.3em}",
+    // Chatwoot's own list and its "no items found" notice, in a popover this script owns.
+    '[data-slack-emoji="emoji"] ul[role="listbox"]:not(.cw-slack-rows){display:none!important}',
+    '[data-slack-emoji="emoji"] [role="status"]{display:none!important}',
   ].join("");
   document.head.appendChild(style);
 
