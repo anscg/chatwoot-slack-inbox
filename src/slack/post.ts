@@ -229,6 +229,15 @@ export async function postSystemMessage(bridge: Bridge, channel: string, threadT
   });
 }
 
+/**
+ * Private, in-thread feedback to one person. `respond()` via an interaction's response_url lands in
+ * the channel rather than the thread, so post the ephemeral message explicitly instead. Not
+ * throttled: it is feedback for a click, and ephemerals don't broadcast.
+ */
+export async function postEphemeralInThread(bridge: Bridge, channel: string, threadTs: string, user: string, text: string): Promise<void> {
+  await bridge.slack.chat.postEphemeral({ channel, thread_ts: threadTs, user, text });
+}
+
 /** Delete one of our own messages; a missing message is not an error. */
 export async function deleteSystemMessage(bridge: Bridge, channel: string, ts: string): Promise<void> {
   try {

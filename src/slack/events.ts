@@ -9,7 +9,7 @@ import { PermanentError } from "../retry.js";
 import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, insertThread, isRelayedSlack, markEventSeen, recordRelayed } from "../store.js";
 import { downloadSlackFiles, type SlackFileRef } from "./files.js";
 import { RESOLVE_ACTION_ID, welcomeBlocks } from "./blocks.js";
-import { BRIDGE_METADATA_EVENT, postSystemMessage } from "./post.js";
+import { BRIDGE_METADATA_EVENT, postEphemeralInThread, postSystemMessage } from "./post.js";
 import { slackToChatwootText } from "./text.js";
 import { getSlackProfile } from "./users.js";
 
@@ -316,7 +316,7 @@ export function registerSlackEvents(app: App, ctx: AppContext): void {
     if (reason) log.debug("skipping slack message", { reason, eventId });
   });
 
-  app.action({ action_id: RESOLVE_ACTION_ID }, async ({ ack, body, respond }) => {
+  app.action({ action_id: RESOLVE_ACTION_ID }, async ({ ack, body }) => {
     await ack(); // Slack wants an ack within 3s; everything else happens after.
     const b = body as unknown as {
       user?: { id?: string };
@@ -332,8 +332,10 @@ export function registerSlackEvents(app: App, ctx: AppContext): void {
       log.warn("resolve button click missing context", { channel, user, threadTs });
       return;
     }
+    const bridge = ctx.bridges.forChannel(channel);
     const problem = await acceptResolveButton(ctx, { channel, threadTs, user, triggerId: b.trigger_id ?? `${channel}:${threadTs}:${user}` });
-    await respond({ response_type: "ephemeral", replace_original: false, text: problem ?? "Marked as resolved." }).catch((err) =>
+    if (!bridge) return;
+    await postEphemeralInThread(bridge, channel, threadTs, user, problem ?? "Marked as resolved.").catch((err) =>
       log.warn("could not answer resolve button click", { error: err instanceof Error ? err.message : String(err) }),
     );
   });

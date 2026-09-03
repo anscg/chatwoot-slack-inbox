@@ -61,7 +61,7 @@ export function mockChatwoot(): MockChatwoot {
 
 export interface MockSlack {
   users: { info: ReturnType<typeof vi.fn> };
-  chat: { postMessage: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
+  chat: { postMessage: ReturnType<typeof vi.fn>; postEphemeral: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
   files: { uploadV2: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
 }
 
@@ -81,7 +81,11 @@ export function mockSlack(): MockSlack {
         },
       })),
     },
-    chat: { postMessage: vi.fn(async () => ({ ok: true, ts: `${Date.now() / 1000}` })), delete: vi.fn(async () => ({ ok: true })) },
+    chat: {
+      postMessage: vi.fn(async () => ({ ok: true, ts: `${Date.now() / 1000}` })),
+      postEphemeral: vi.fn(async () => ({ ok: true })),
+      delete: vi.fn(async () => ({ ok: true })),
+    },
   };
 }
 
