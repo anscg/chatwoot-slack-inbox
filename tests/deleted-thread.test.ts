@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { applyChatwootStatus, relayChatwootMessage, type ChatwootMessageJob } from "../src/chatwoot/webhook.js";
 import { threads } from "../src/db/schema.js";
 import { acceptSlackMessage, JOB_SLACK_MESSAGE, JOB_THREAD_DELETED, noteThreadDeleted, relaySlackMessage, type IncomingSlackMessage } from "../src/slack/events.js";
+import { BRIDGE_METADATA_EVENT } from "../src/slack/post.js";
 import { flush, makeContext, type TestContext } from "./helpers.js";
 
 const PARENT = "1700000000.000100";
@@ -63,6 +64,38 @@ describe("a deleted question", () => {
 
     expect(ctx.slackMock.chat.delete).toHaveBeenCalledWith({ channel: "C_HELP", ts: "1700000000.000150" });
     expect(ctx.slackMock.chat.delete).toHaveBeenCalledTimes(1); // never the tombstone, which is not ours
+  });
+
+  it("recognises its own message by the marker it carries when the cached bot ids are stale", async () => {
+    const ctx = await setup();
+    await acceptSlackMessage(ctx, "Ev1", post());
+    await flush();
+    ctx.slackMock.conversations.replies.mockResolvedValueOnce({
+      ok: true,
+      messages: [
+        { ts: PARENT, subtype: "tombstone" },
+        { ts: "1700000000.000150", bot_id: "B_SOMETHING_ELSE", metadata: { event_type: BRIDGE_METADATA_EVENT }, text: "Hi there" },
+      ],
+    });
+
+    await acceptSlackMessage(ctx, "Ev2", deletion());
+    await flush();
+
+    expect(ctx.slackMock.chat.delete).toHaveBeenCalledWith({ channel: "C_HELP", ts: "1700000000.000150" });
+  });
+
+  it("falls back to the welcome message it recorded when Slack will not list the thread", async () => {
+    const ctx = await setup();
+    await acceptSlackMessage(ctx, "Ev1", post());
+    await flush();
+    const welcomeTs = (await ctx.db.select().from(threads))[0]!.welcomeMessageTs;
+    expect(welcomeTs).toBeTruthy();
+    ctx.slackMock.conversations.replies.mockRejectedValueOnce(Object.assign(new Error("thread_not_found"), { data: { error: "thread_not_found" } }));
+
+    await acceptSlackMessage(ctx, "Ev2", deletion());
+    await flush();
+
+    expect(ctx.slackMock.chat.delete).toHaveBeenCalledWith({ channel: "C_HELP", ts: welcomeTs });
   });
 
   it("leaves the thread alone when a person has replied", async () => {

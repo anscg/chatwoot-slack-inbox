@@ -363,11 +363,13 @@ export async function noteThreadDeleted(ctx: AppContext, job: ThreadDeletedJob):
   if (!bridge) throw new PermanentError(`no bridge for channel ${job.channel}`);
   const thread = await findThreadBySlack(ctx.db, job.channel, job.ts);
   if (!thread) return;
-  const removed = await deleteBridgeOnlyThread(bridge, job.channel, job.ts).catch((err) => {
+  // What we know we posted, for when Slack will not list the thread at all.
+  const ours = [thread.welcomeMessageTs, thread.statusMessageTs].filter((ts): ts is string => Boolean(ts));
+  const removed = await deleteBridgeOnlyThread(bridge, job.channel, job.ts, ours).catch((err) => {
     log.warn("could not tidy up the orphaned thread", { channel: job.channel, ts: job.ts, error: err instanceof Error ? err.message : String(err) });
     return 0;
   });
-  if (removed) log.info("removed the bridge's own messages from a deleted thread", { channel: job.channel, ts: job.ts, removed });
+  log.info("tidied up after a deleted thread", { channel: job.channel, ts: job.ts, removed });
   await bridge.chatwoot.createAgentMessage(
     thread.chatwootConversationId,
     "_The Slack message that started this conversation was deleted. Nothing further will be relayed to Slack._",

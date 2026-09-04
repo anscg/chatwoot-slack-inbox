@@ -297,6 +297,7 @@ interface ReplyRef {
   user?: string;
   bot_id?: string;
   subtype?: string;
+  metadata?: { event_type?: string };
 }
 
 /**
@@ -306,25 +307,43 @@ interface ReplyRef {
  * the last reply is gone. Anything a person wrote is left untouched, and its presence cancels the
  * cleanup entirely.
  */
-export async function deleteBridgeOnlyThread(bridge: Bridge, channel: string, threadTs: string): Promise<number> {
-  let messages: ReplyRef[];
+export async function deleteBridgeOnlyThread(bridge: Bridge, channel: string, threadTs: string, fallbackTs: string[] = []): Promise<number> {
+  let messages: ReplyRef[] | undefined;
   try {
-    const res = await bridge.slack.conversations.replies({ channel, ts: threadTs, limit: 200 });
+    // include_all_metadata is what makes our own marker visible here; without it Slack strips it.
+    const res = await bridge.slack.conversations.replies({ channel, ts: threadTs, limit: 200, include_all_metadata: true });
     messages = (res.messages ?? []) as ReplyRef[];
   } catch (err) {
     const code = (err as { data?: { error?: string } })?.data?.error;
-    if (code === "thread_not_found" || code === "message_not_found" || code === "channel_not_found") return 0;
-    throw err;
+    if (code !== "thread_not_found" && code !== "message_not_found" && code !== "channel_not_found") throw err;
+    log.info("cannot list the deleted thread; falling back to the messages we recorded", { channel, threadTs, error: code });
   }
+
+  // Slack would not tell us what is in the thread, so all we can go on is what we posted ourselves.
+  if (!messages) return deleteEach(bridge, channel, fallbackTs);
 
   const remaining = messages.filter((m) => m.ts && m.ts !== threadTs && m.subtype !== "tombstone");
   if (remaining.length === 0) return 0;
-  const isOurs = (m: ReplyRef) => m.bot_id === bridge.botId || m.user === bridge.botUserId;
-  if (!remaining.every(isOurs)) return 0;
+  // Ours by author, or by the marker every message the bridge posts carries: a bridge whose cached
+  // bot ids are stale would otherwise recognise nothing of its own.
+  const isOurs = (m: ReplyRef) => m.bot_id === bridge.botId || m.user === bridge.botUserId || m.metadata?.event_type === BRIDGE_METADATA_EVENT;
+  const theirs = remaining.filter((m) => !isOurs(m));
+  if (theirs.length > 0) {
+    log.info("leaving a deleted thread alone: someone else has posted in it", {
+      channel,
+      threadTs,
+      remaining: remaining.length,
+      theirs: theirs.map((m) => m.user ?? m.bot_id ?? "?"),
+    });
+    return 0;
+  }
+  return deleteEach(bridge, channel, remaining.map((m) => m.ts!));
+}
 
+async function deleteEach(bridge: Bridge, channel: string, tss: string[]): Promise<number> {
   let deleted = 0;
-  for (const m of remaining) {
-    await deleteSystemMessage(bridge, channel, m.ts!);
+  for (const ts of tss) {
+    await deleteSystemMessage(bridge, channel, ts);
     deleted += 1;
   }
   return deleted;
