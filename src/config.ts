@@ -19,6 +19,9 @@ const keySchema = z
     return buf;
   });
 
+/** A variable left blank in a .env file arrives as "", which means "not set", not "invalid". */
+const blankIsUnset = <T extends z.ZodTypeAny>(schema: T) => z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? undefined : v), schema);
+
 const envSchema = z.object({
   /**
    * The "hub" Slack app: admin sign-in, agent /link, and user profile lookups.
@@ -39,7 +42,22 @@ const envSchema = z.object({
    * an agent's own Chatwoot access token is fetched automatically as they link, so their Slack
    * replies are attributed to them without an admin pasting a token per person.
    */
-  CHATWOOT_PLATFORM_TOKEN: z.string().trim().min(1).optional(),
+  CHATWOOT_PLATFORM_TOKEN: blankIsUnset(z.string().trim().min(1).optional()),
+
+  /**
+   * Optional Hack Club Auth (OIDC) app. When set, someone whose Slack email matches no Chatwoot
+   * agent is offered a sign-in there, and the email that comes back is matched instead — Chatwoot
+   * accounts created through Hack Club Auth often carry a different address from Slack.
+   */
+  HCA_CLIENT_ID: blankIsUnset(z.string().trim().min(1).optional()),
+  HCA_CLIENT_SECRET: blankIsUnset(z.string().trim().min(1).optional()),
+  HCA_ISSUER: blankIsUnset(
+    z
+      .string()
+      .url("HCA_ISSUER must be a URL")
+      .transform((u) => u.replace(/\/+$/, ""))
+      .default("https://auth.hackclub.com"),
+  ),
 
   /** Comma-separated Slack user IDs allowed into the control panel. */
   ADMIN_SLACK_USER_IDS: z

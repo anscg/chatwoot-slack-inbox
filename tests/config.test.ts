@@ -25,6 +25,13 @@ describe("config", () => {
     expect(c.PORT).toBe(3000);
   });
 
+  it("treats an optional variable left blank in a .env file as unset", () => {
+    const c = loadConfig({ ...valid, CHATWOOT_PLATFORM_TOKEN: "", HCA_CLIENT_ID: "", HCA_CLIENT_SECRET: "", HCA_ISSUER: "" });
+    expect(c.CHATWOOT_PLATFORM_TOKEN).toBeUndefined();
+    expect(c.HCA_CLIENT_ID).toBeUndefined();
+    expect(c.HCA_ISSUER).toBe("https://auth.hackclub.com");
+  });
+
   it("exits loudly listing every missing variable", () => {
     const exit = vi.spyOn(process, "exit").mockImplementation((() => {
       throw new Error("exit");
