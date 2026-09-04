@@ -330,6 +330,39 @@ export async function deleteBridgeOnlyThread(bridge: Bridge, channel: string, th
   return deleted;
 }
 
+/**
+ * Delete a message the bridge put in a thread. The bot cannot delete a message posted with an
+ * agent's own user token, so fall back to that agent's token when we can still resolve it.
+ */
+export async function deleteRelayedSlackMessage(
+  ctx: AppContext,
+  bridge: Bridge,
+  channel: string,
+  ts: string,
+  sender: ChatwootSenderRef | null | undefined,
+): Promise<void> {
+  try {
+    await bridge.slack.chat.delete({ channel, ts });
+    return;
+  } catch (err) {
+    const e = err as { data?: { error?: string } };
+    if (e?.data?.error === "message_not_found") return;
+    if (e?.data?.error !== "cant_delete_message") throw err;
+  }
+  const identity = await resolvePostIdentity(ctx, sender);
+  if (identity.kind !== "user") {
+    log.warn("cannot delete a relayed message: it was not posted by the bot and its author is unknown", { channel, ts });
+    return;
+  }
+  try {
+    await createUserClient(identity.token).chat.delete({ channel, ts });
+  } catch (err) {
+    const e = err as { data?: { error?: string } };
+    if (e?.data?.error === "message_not_found") return;
+    throw err;
+  }
+}
+
 /** Delete one of our own messages; a missing message is not an error. */
 export async function deleteSystemMessage(bridge: Bridge, channel: string, ts: string): Promise<void> {
   try {

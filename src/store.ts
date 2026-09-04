@@ -1,6 +1,6 @@
 import { and, desc, eq, gte, inArray, isNull, lt } from "drizzle-orm";
 import type { Db } from "./db/client.js";
-import { agents, heldMessages, relayed, relayedFiles, seenEvents, threads, type Agent, type HeldMessage, type Thread } from "./db/schema.js";
+import { agents, heldMessages, relayed, relayedFiles, seenEvents, threads, type Agent, type HeldMessage, type Relayed, type Thread } from "./db/schema.js";
 
 export const SEEN_EVENT_TTL_MS = 24 * 60 * 60_000;
 
@@ -41,6 +41,21 @@ export async function allFilesRelayed(db: Db, slackFileIds: string[]): Promise<b
 export async function isRelayedChatwoot(db: Db, chatwootMessageId: number): Promise<boolean> {
   const rows = await db.select({ id: relayed.id }).from(relayed).where(eq(relayed.chatwootMessageId, chatwootMessageId)).limit(1);
   return rows.length > 0;
+}
+
+/** The relay record for one Slack message, either direction, or undefined if we never relayed it. */
+export async function findRelayedBySlack(db: Db, channel: string, ts: string): Promise<Relayed | undefined> {
+  const rows = await db
+    .select()
+    .from(relayed)
+    .where(and(eq(relayed.slackChannel, channel), eq(relayed.slackTs, ts)))
+    .limit(1);
+  return rows[0];
+}
+
+export async function findRelayedByChatwoot(db: Db, chatwootMessageId: number): Promise<Relayed | undefined> {
+  const rows = await db.select().from(relayed).where(eq(relayed.chatwootMessageId, chatwootMessageId)).limit(1);
+  return rows[0];
 }
 
 export async function recordRelayed(

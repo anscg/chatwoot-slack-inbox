@@ -4,9 +4,18 @@ import type { AppContext } from "../context.js";
 import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
 import { buttonForStatus, messageBlocks } from "../slack/blocks.js";
-import { deleteSystemMessage, postSystemMessage, postToSlackThread, resolvePostIdentity, setBotReaction, SlackUploadUnavailable, ThreadGone, updateSystemMessage, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
+import { deleteRelayedSlackMessage, deleteSystemMessage, postSystemMessage, postToSlackThread, resolvePostIdentity, setBotReaction, SlackUploadUnavailable, ThreadGone, updateSystemMessage, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
 import { chatwootToSlackText } from "../slack/text.js";
-import { clearReopenPrompt, findThreadByConversation, isRelayedChatwoot, markThreadDeleted, recordRelayed, recordRelayedFiles, setThreadStatus } from "../store.js";
+import {
+  clearReopenPrompt,
+  findRelayedByChatwoot,
+  findThreadByConversation,
+  isRelayedChatwoot,
+  markThreadDeleted,
+  recordRelayed,
+  recordRelayedFiles,
+  setThreadStatus,
+} from "../store.js";
 
 const MAX_ATTACHMENT_BYTES = 40 * 1024 * 1024;
 
@@ -41,6 +50,7 @@ function filenameFor(url: string, contentType: string | null, type: string): str
 
 export const JOB_CHATWOOT_MESSAGE = "chatwoot_message";
 export const JOB_CHATWOOT_STATUS = "chatwoot_status";
+export const JOB_CHATWOOT_DELETE = "chatwoot_delete";
 
 /**
  * Chatwoot fires the webhook for messages the bridge itself created via the API a
@@ -77,6 +87,12 @@ export interface ChatwootMessageJob extends Record<string, unknown> {
   attachments: { url: string; type: string }[];
 }
 
+/** An agent deleted a message in Chatwoot; the copy in Slack should go too. */
+export interface ChatwootDeleteJob extends Record<string, unknown> {
+  messageId: number;
+  sender: ChatwootSenderRef | null;
+}
+
 export interface ChatwootStatusJob extends Record<string, unknown> {
   conversationId: number;
   status: string;
@@ -86,12 +102,21 @@ export interface ChatwootStatusJob extends Record<string, unknown> {
 }
 
 /** Validate + shape a webhook body into a job. Returns a skip reason or the job. No I/O. */
-export function classifyWebhook(body: ChatwootWebhookPayload): { skip: string } | { job: ChatwootMessageJob } | { statusJob: ChatwootStatusJob } {
+export function classifyWebhook(
+  body: ChatwootWebhookPayload,
+): { skip: string } | { job: ChatwootMessageJob } | { statusJob: ChatwootStatusJob } | { deleteJob: ChatwootDeleteJob } {
   if (body.event === "conversation_status_changed") {
     if (!body.id || !body.status) return { skip: "missing ids" };
     const accountId = body.account?.id ?? body.messages?.find((m) => m.account_id)?.account_id;
     const inboxId = body.inbox_id ?? body.conversation?.inbox_id;
     return { statusJob: { conversationId: body.id, status: body.status, ...(accountId ? { accountId } : {}), ...(inboxId ? { inboxId } : {}) } };
+  }
+  // Chatwoot soft-deletes: the message stays and is flagged, so a deletion arrives as an update.
+  if (body.event === "message_updated") {
+    if (!body.content_attributes?.deleted) return { skip: "message_updated that is not a deletion" };
+    if (!body.id) return { skip: "missing ids" };
+    const sender = body.sender ? { id: body.sender.id, name: body.sender.name, avatar_url: body.sender.avatar_url } : null;
+    return { deleteJob: { messageId: body.id, sender } };
   }
   if (body.event !== "message_created") return { skip: `event ${body.event}` };
   if (body.message_type !== "outgoing" && body.message_type !== 1) return { skip: `message_type ${body.message_type}` };
@@ -267,6 +292,20 @@ export async function applyChatwootStatus(ctx: AppContext, job: ChatwootStatusJo
   log.info("conversation status changed", { bridge: bridge.row.name, conversationId: job.conversationId, status: job.status, notice: Boolean(text) });
 }
 
+/**
+ * Mirror a Chatwoot deletion into Slack. Only messages that went Chatwoot -> Slack are touched:
+ * a relayed Slack message deleted in Chatwoot is a deletion we ourselves just made, and taking the
+ * original down in Slack would be deleting something the bridge was only reporting.
+ */
+export async function deleteSlackCopy(ctx: AppContext, job: ChatwootDeleteJob): Promise<void> {
+  const record = await findRelayedByChatwoot(ctx.db, job.messageId);
+  if (!record || record.direction !== "chatwoot_to_slack") return;
+  const bridge = ctx.bridges.forChannel(record.slackChannel);
+  if (!bridge) throw new PermanentError(`no bridge for channel ${record.slackChannel}`);
+  await deleteRelayedSlackMessage(ctx, bridge, record.slackChannel, record.slackTs, job.sender);
+  log.info("deleted a Slack message after its Chatwoot copy went", { bridge: bridge.row.name, ts: record.slackTs, messageId: job.messageId });
+}
+
 function secretMatches(given: string, expected: string): boolean {
   const a = Buffer.from(given);
   const b = Buffer.from(expected);
@@ -276,6 +315,7 @@ function secretMatches(given: string, expected: string): boolean {
 export function registerChatwootWebhook(router: Router, ctx: AppContext): void {
   ctx.retry.register(JOB_CHATWOOT_MESSAGE, (payload) => relayChatwootMessage(ctx, payload as ChatwootMessageJob));
   ctx.retry.register(JOB_CHATWOOT_STATUS, (payload) => applyChatwootStatus(ctx, payload as ChatwootStatusJob));
+  ctx.retry.register(JOB_CHATWOOT_DELETE, (payload) => deleteSlackCopy(ctx, payload as ChatwootDeleteJob));
 
   router.post("/webhooks/chatwoot/:secret", (req: Request, res: Response) => {
     const secret = String(req.params.secret ?? "");
@@ -307,6 +347,10 @@ export function registerChatwootWebhook(router: Router, ctx: AppContext): void {
     if ("skip" in result) return;
     if ("statusJob" in result) {
       void ctx.retry.runOrEnqueue(JOB_CHATWOOT_STATUS, result.statusJob);
+      return;
+    }
+    if ("deleteJob" in result) {
+      void ctx.retry.runOrEnqueue(JOB_CHATWOOT_DELETE, result.deleteJob);
       return;
     }
     void ctx.retry.runOrEnqueue(JOB_CHATWOOT_MESSAGE, result.job);

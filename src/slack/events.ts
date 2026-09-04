@@ -9,6 +9,7 @@ import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
 import {
   BROADCAST_NOTICE_MESSAGE,
+  DELETED_PREFIX,
   FOLLOWUP_ALREADY_SENT_MESSAGE,
   FOLLOWUP_PROMPT_TIMEOUT_MS,
   FOLLOWUP_PROMPT_WINDOW_MS,
@@ -16,6 +17,7 @@ import {
   FOLLOWUP_SEPARATE_MESSAGE,
   REOPEN_PROMPT_TIMEOUT_MESSAGE,
   REOPEN_PROMPT_TIMEOUT_MS,
+  struckThrough,
 } from "../messages.js";
 import {
   allFilesRelayed,
@@ -23,6 +25,7 @@ import {
   clearReopenPrompt,
   findHeldMessage,
   findRecentThreadByAuthor,
+  findRelayedBySlack,
   holdMessage,
   findAgentBySlackUser,
   findThreadBySlack,
@@ -61,6 +64,7 @@ export const JOB_REOPEN_TIMEOUT = "slack_reopen_timeout";
 export const JOB_BROADCAST_NOTICE = "slack_broadcast_notice";
 export const JOB_FOLLOWUP_PROMPT = "slack_followup_prompt";
 export const JOB_FOLLOWUP_TIMEOUT = "slack_followup_timeout";
+export const JOB_REPLY_DELETED = "slack_reply_deleted";
 
 /** The subset of a Slack message event we persist into the retry payload. */
 export interface SlackMessageJob extends Record<string, unknown> {
@@ -105,8 +109,16 @@ export interface IncomingSlackMessage {
   text?: string;
   files?: SlackFileRef[];
   metadata?: { event_type?: string };
-  /** message_deleted: the ts of the message that was removed. */
+  /** message_deleted: the ts of the message that was removed, and a copy of what it said. */
   deleted_ts?: string;
+  previous_message?: { ts?: string; thread_ts?: string; user?: string };
+}
+
+/** A relayed Slack reply was deleted; take the Chatwoot copy down with it. */
+export interface ReplyDeletedJob extends Record<string, unknown> {
+  channel: string;
+  conversationId: number;
+  chatwootMessageId: number;
 }
 
 export interface ThreadDeletedJob extends Record<string, unknown> {
@@ -179,11 +191,27 @@ export async function acceptSlackMessage(ctx: AppContext, eventId: string, msg: 
     const deletedTs = msg.deleted_ts;
     if (!deletedTs) return "message_deleted without deleted_ts";
     const gone = await findThreadBySlack(ctx.db, msg.channel, deletedTs);
-    if (!gone) return "deleted message did not start a bridged thread";
-    if (gone.deletedAt) return "thread already marked deleted";
-    await markThreadDeleted(ctx.db, gone.id);
-    void ctx.retry.runOrEnqueue(JOB_THREAD_DELETED, { channel: msg.channel, ts: deletedTs } satisfies ThreadDeletedJob);
-    return "thread parent deleted; bridging stopped";
+    if (gone) {
+      if (gone.deletedAt) return "thread already marked deleted";
+      await markThreadDeleted(ctx.db, gone.id);
+      void ctx.retry.runOrEnqueue(JOB_THREAD_DELETED, { channel: msg.channel, ts: deletedTs } satisfies ThreadDeletedJob);
+      return "thread parent deleted; bridging stopped";
+    }
+    // Not the question itself, so it was a reply. Mirror the deletion into Chatwoot if we relayed
+    // it; a message we posted *from* Chatwoot is left alone, or deleting one there would bounce back.
+    const record = await findRelayedBySlack(ctx.db, msg.channel, deletedTs);
+    if (!record) return "deleted message was never relayed";
+    if (record.direction !== "slack_to_chatwoot") return "deleted message came from Chatwoot";
+    const parentTs = msg.previous_message?.thread_ts;
+    const parent = parentTs ? await findThreadBySlack(ctx.db, msg.channel, parentTs) : undefined;
+    if (!parent) return "deleted reply's thread is not mapped";
+    if (!(await markEventSeen(ctx.db, eventId))) return "duplicate event";
+    void ctx.retry.runOrEnqueue(JOB_REPLY_DELETED, {
+      channel: msg.channel,
+      conversationId: parent.chatwootConversationId,
+      chatwootMessageId: record.chatwootMessageId,
+    } satisfies ReplyDeletedJob);
+    return null;
   }
   if (!RELAYABLE_SUBTYPES.has(msg.subtype)) return `subtype ${msg.subtype}`;
   if (msg.bot_id && msg.bot_id === bridge.botId) return "own bot message";
@@ -346,6 +374,31 @@ export async function noteThreadDeleted(ctx: AppContext, job: ThreadDeletedJob):
     { private: true },
   );
   log.info("thread parent deleted", { bridge: bridge.row.name, conversationId: thread.chatwootConversationId, channel: job.channel, ts: job.ts });
+}
+
+/**
+ * Mark a deleted Slack reply as deleted in Chatwoot. The message is not removed: helpers usually
+ * need to know what was said and that it is gone, so the text stays, struck through behind a
+ * `[DELETED]` marker.
+ */
+export async function markDeletedReply(ctx: AppContext, job: ReplyDeletedJob): Promise<void> {
+  const bridge = ctx.bridges.forChannel(job.channel);
+  if (!bridge) throw new PermanentError(`no bridge for channel ${job.channel}`);
+  try {
+    const message = (await bridge.chatwoot.listMessages(job.conversationId)).find((m) => m.id === job.chatwootMessageId);
+    // Older than the page Chatwoot hands back, or gone already. Nothing to rewrite.
+    if (!message) return void log.warn("could not find the Chatwoot message a deleted Slack reply belongs to", { messageId: job.chatwootMessageId });
+    const content = message.content ?? "";
+    if (content.startsWith(DELETED_PREFIX)) return; // a retry of a job that already ran
+    await bridge.chatwoot.updateMessageContent(job.conversationId, job.chatwootMessageId, struckThrough(content));
+  } catch (err) {
+    permanentIf4xx(err);
+  }
+  log.info("marked a message deleted in Chatwoot after its Slack original went", {
+    bridge: bridge.row.name,
+    conversationId: job.conversationId,
+    messageId: job.chatwootMessageId,
+  });
 }
 
 /** Private nudge to someone whose message was held back for want of a linked account. */
@@ -656,6 +709,7 @@ export function registerSlackJobs(ctx: AppContext): void {
   ctx.retry.register(JOB_BROADCAST_NOTICE, (payload) => noteThreadBroadcast(ctx, payload as BroadcastNoticeJob));
   ctx.retry.register(JOB_FOLLOWUP_PROMPT, (payload) => askAboutFollowup(ctx, payload as unknown as FollowupPromptJob));
   ctx.retry.register(JOB_FOLLOWUP_TIMEOUT, (payload) => releaseUnansweredFollowup(ctx, payload as FollowupTimeoutJob));
+  ctx.retry.register(JOB_REPLY_DELETED, (payload) => markDeletedReply(ctx, payload as ReplyDeletedJob));
 }
 
 /** Attach listeners to one bridge's Bolt app. Events are still validated against the channel mapping. */

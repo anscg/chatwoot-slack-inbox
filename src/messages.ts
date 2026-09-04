@@ -47,3 +47,15 @@ export const FOLLOWUP_RELATED_MESSAGE =
   "Got it, no second ticket then. Could you delete this message and post it as a reply in your earlier thread instead? Keeping one question per thread is how the helpers keep track. Thank you!";
 /** Shown when someone answers the follow-up prompt after the hold already timed out. */
 export const FOLLOWUP_ALREADY_SENT_MESSAGE = "That one had already gone to the helpers while this was waiting.";
+
+/** Marks a Chatwoot message whose Slack original was deleted. Agents keep the text, struck through. */
+export const DELETED_PREFIX = "[DELETED]";
+
+/** `[DELETED]` in front, the rest struck through line by line so multi-line text still renders. */
+export function struckThrough(content: string): string {
+  const struck = content
+    .split("\n")
+    .map((line) => (line.trim() ? `~~${line}~~` : line))
+    .join("\n");
+  return `${DELETED_PREFIX} ${struck}`;
+}

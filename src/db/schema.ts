@@ -183,4 +183,5 @@ export type BridgeRow = typeof bridges.$inferSelect;
 export type Thread = typeof threads.$inferSelect;
 export type Agent = typeof agents.$inferSelect;
 export type Retry = typeof retries.$inferSelect;
+export type Relayed = typeof relayed.$inferSelect;
 export type HeldMessage = typeof heldMessages.$inferSelect;

@@ -185,6 +185,27 @@ export class ChatwootClient {
     return this.json<ChatwootMessage>("POST", url, { token, form });
   }
 
+  /** Delete a message; Chatwoot soft-deletes it and shows "This message was deleted". */
+  async deleteMessage(conversationId: number, messageId: number, apiToken?: string): Promise<void> {
+    await this.json("DELETE", `${this.appBase}/conversations/${conversationId}/messages/${messageId}`, { token: apiToken ?? this.opts.apiToken });
+  }
+
+  /** The conversation's most recent messages, newest last. */
+  async listMessages(conversationId: number, apiToken?: string): Promise<ChatwootMessage[]> {
+    const res = await this.json<{ payload?: ChatwootMessage[] } | ChatwootMessage[]>("GET", `${this.appBase}/conversations/${conversationId}/messages`, {
+      token: apiToken ?? this.opts.apiToken,
+    });
+    return Array.isArray(res) ? res : (res.payload ?? []);
+  }
+
+  /** Rewrite a message's text in place, as Chatwoot's own edit-message feature does. */
+  async updateMessageContent(conversationId: number, messageId: number, content: string, apiToken?: string): Promise<void> {
+    await this.json("PATCH", `${this.appBase}/conversations/${conversationId}/messages/${messageId}`, {
+      token: apiToken ?? this.opts.apiToken,
+      body: { content },
+    });
+  }
+
   async toggleStatusAsAgent(conversationId: number, status: "open" | "resolved" | "pending", apiToken?: string): Promise<void> {
     await this.json("POST", `${this.appBase}/conversations/${conversationId}/toggle_status`, {
       token: apiToken ?? this.opts.apiToken,
