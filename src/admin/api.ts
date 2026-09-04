@@ -9,7 +9,7 @@ import { recentTraffic } from "../diagnostics.js";
 import { encryptToken } from "../crypto.js";
 import { agents, bridges, relayed, retries, threads } from "../db/schema.js";
 import { log } from "../logger.js";
-import { DEFAULT_LINK_PROMPT, DEFAULT_REOPEN_BUTTON_LABEL, DEFAULT_REOPEN_MESSAGE, DEFAULT_REOPEN_PROMPT, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_MESSAGE, DEFAULT_RESOLVED_EMOJI, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
+import { DEFAULT_FOLLOWUP_PROMPT, DEFAULT_LINK_PROMPT, DEFAULT_REOPEN_BUTTON_LABEL, DEFAULT_REOPEN_MESSAGE, DEFAULT_REOPEN_PROMPT, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_MESSAGE, DEFAULT_RESOLVED_EMOJI, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
 import { ADMIN_COOKIE, parseCookies, Signer, type AdminSession } from "../session.js";
 import { bridgeManifest, SLUG_RE, slugify } from "../slack/manifest.js";
 
@@ -71,6 +71,7 @@ const bridgeInput = z.object({
   resolveMessage: messageField,
   reopenMessage: messageField,
   reopenPromptMessage: messageField,
+  followupPromptMessage: messageField,
   requireLink: z.boolean().optional(),
   linkPromptMessage: messageField,
   enabled: z.boolean().optional(),
@@ -127,6 +128,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
         resolveMessage: DEFAULT_RESOLVE_MESSAGE,
         reopenMessage: DEFAULT_REOPEN_MESSAGE,
         reopenPromptMessage: DEFAULT_REOPEN_PROMPT,
+        followupPromptMessage: DEFAULT_FOLLOWUP_PROMPT,
         linkPromptMessage: DEFAULT_LINK_PROMPT,
       },
     });
@@ -209,6 +211,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           resolveMessage: d.resolveMessage === undefined ? DEFAULT_RESOLVE_MESSAGE : d.resolveMessage,
           reopenMessage: d.reopenMessage === undefined ? DEFAULT_REOPEN_MESSAGE : d.reopenMessage,
           reopenPromptMessage: d.reopenPromptMessage === undefined ? DEFAULT_REOPEN_PROMPT : d.reopenPromptMessage,
+          followupPromptMessage: d.followupPromptMessage === undefined ? DEFAULT_FOLLOWUP_PROMPT : d.followupPromptMessage,
           requireLink: d.requireLink ?? false,
           linkPromptMessage: d.linkPromptMessage === undefined ? DEFAULT_LINK_PROMPT : d.linkPromptMessage,
           enabled: d.enabled ?? true,
@@ -267,6 +270,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           ...(d.resolveMessage !== undefined ? { resolveMessage: d.resolveMessage } : {}),
           ...(d.reopenMessage !== undefined ? { reopenMessage: d.reopenMessage } : {}),
           ...(d.reopenPromptMessage !== undefined ? { reopenPromptMessage: d.reopenPromptMessage } : {}),
+          ...(d.followupPromptMessage !== undefined ? { followupPromptMessage: d.followupPromptMessage } : {}),
           ...(d.requireLink !== undefined ? { requireLink: d.requireLink } : {}),
           ...(d.linkPromptMessage !== undefined ? { linkPromptMessage: d.linkPromptMessage } : {}),
           ...(d.enabled !== undefined ? { enabled: d.enabled } : {}),
@@ -306,6 +310,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           resolveMessage: Boolean(row.resolveMessage),
           reopenMessage: Boolean(row.reopenMessage),
           reopenPromptMessage: Boolean(row.reopenPromptMessage),
+          followupPromptMessage: Boolean(row.followupPromptMessage),
           requireLink: row.requireLink,
           linkPromptMessage: Boolean(row.linkPromptMessage),
         },

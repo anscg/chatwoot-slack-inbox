@@ -64,6 +64,20 @@
       "when": 1788458317857,
       "tag": "0008_require_link",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788489236931,
+      "tag": "0009_reopen_prompt_timeout",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788491130804,
+      "tag": "0010_followup_prompt",
+      "breakpoints": true
     }
   ]
 }

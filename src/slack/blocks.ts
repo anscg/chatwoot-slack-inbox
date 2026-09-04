@@ -1,5 +1,5 @@
 import type { KnownBlock } from "@slack/web-api";
-import { REOPEN_PROMPT_ACCIDENTAL_LABEL, REOPEN_PROMPT_KEEP_LABEL } from "../messages.js";
+import { FOLLOWUP_PROMPT_RELATED_LABEL, FOLLOWUP_PROMPT_SEPARATE_LABEL, REOPEN_PROMPT_ACCIDENTAL_LABEL, REOPEN_PROMPT_KEEP_LABEL } from "../messages.js";
 
 export const RESOLVE_ACTION_ID = "chatwoot_bridge_resolve";
 
@@ -78,6 +78,37 @@ export function reopenPromptBlocks(text: string, threadTs: string): KnownBlock[]
           style: "danger",
           text: { type: "plain_text", text: REOPEN_PROMPT_KEEP_LABEL, emoji: true },
           value: threadTs,
+        },
+      ],
+    },
+  ];
+}
+
+export const FOLLOWUP_SEPARATE_ACTION_ID = "chatwoot_bridge_followup_separate";
+export const FOLLOWUP_RELATED_ACTION_ID = "chatwoot_bridge_followup_related";
+
+/**
+ * The private prompt shown to someone whose new question may really be a follow-up to their last
+ * one. The value on both buttons is the held message's own ts, which is what identifies the hold.
+ */
+export function followupPromptBlocks(text: string, ts: string): KnownBlock[] {
+  return [
+    { type: "section", text: { type: "mrkdwn", text } },
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          action_id: FOLLOWUP_SEPARATE_ACTION_ID,
+          style: "primary",
+          text: { type: "plain_text", text: FOLLOWUP_PROMPT_SEPARATE_LABEL, emoji: true },
+          value: ts,
+        },
+        {
+          type: "button",
+          action_id: FOLLOWUP_RELATED_ACTION_ID,
+          text: { type: "plain_text", text: FOLLOWUP_PROMPT_RELATED_LABEL, emoji: true },
+          value: ts,
         },
       ],
     },

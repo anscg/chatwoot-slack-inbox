@@ -20,6 +20,7 @@ interface Draft {
   resolveMessage: string;
   reopenMessage: string;
   reopenPromptMessage: string;
+  followupPromptMessage: string;
   requireLink: boolean;
   linkPromptMessage: string;
   enabled: boolean;
@@ -43,6 +44,7 @@ const EMPTY: Draft = {
   resolveMessage: "",
   reopenMessage: "",
   reopenPromptMessage: "",
+  followupPromptMessage: "",
   requireLink: false,
   linkPromptMessage: "",
   enabled: true,
@@ -72,6 +74,7 @@ function fromBridge(b: Bridge): Draft {
     resolveMessage: b.resolveMessage ?? "",
     reopenMessage: b.reopenMessage ?? "",
     reopenPromptMessage: b.reopenPromptMessage ?? "",
+    followupPromptMessage: b.followupPromptMessage ?? "",
     requireLink: b.requireLink,
     linkPromptMessage: b.linkPromptMessage ?? "",
     enabled: b.enabled,
@@ -246,6 +249,7 @@ function CheckPanel({ check, onClose }: { check: BridgeCheck | "loading"; onClos
           />
           <Row ok={b.welcomeMessage} label="Welcome message" detail={b.welcomeMessage ? "set" : "off"} />
           <Row ok={b.reopenPromptMessage} label="Accidental-reopen prompt" detail={b.reopenPromptMessage ? "set" : "off"} />
+          <Row ok={b.followupPromptMessage} label="Second-question check" detail={b.followupPromptMessage ? "set" : "off"} />
           <Row
             ok={null}
             label="Linked account required to post"
@@ -369,6 +373,7 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
       resolveMessage: d.resolveMessage,
       reopenMessage: d.reopenMessage,
       reopenPromptMessage: d.reopenPromptMessage,
+      followupPromptMessage: d.followupPromptMessage,
       requireLink: d.requireLink,
       linkPromptMessage: d.linkPromptMessage,
       enabled: d.enabled,
@@ -579,6 +584,14 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
           <label>Private prompt when someone's reply reopens a resolved ticket (blank = off)</label>
           <textarea rows={2} value={d.reopenPromptMessage} onChange={set("reopenPromptMessage")} />
           <p className="note">Only that person sees it, with a green button that resolves the ticket again and a red one that keeps it open.</p>
+        </div>
+        <div className="field" style={{ gridColumn: "1 / -1" }}>
+          <label>Private prompt when someone posts a second question minutes after their first (blank = off)</label>
+          <textarea rows={2} value={d.followupPromptMessage} onChange={set("followupPromptMessage")} placeholder={me.defaults.followupPromptMessage} />
+          <p className="note">
+            Held back for up to 10 minutes while they choose: a separate question opens a ticket as usual, a follow-up opens none and they are asked to move it
+            into their earlier thread. No answer means it goes through as a separate question.
+          </p>
         </div>
       </div>
 

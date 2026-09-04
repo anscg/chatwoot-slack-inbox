@@ -32,7 +32,7 @@ export interface Me {
   user: { userId: string; name: string };
   chatwootBaseUrl: string;
   publicUrl: string;
-  defaults: { welcomeMessage: string; resolvedEmoji: string; resolveButtonLabel: string; reopenButtonLabel: string; resolveMessage: string; reopenMessage: string; reopenPromptMessage: string; linkPromptMessage: string };
+  defaults: { welcomeMessage: string; resolvedEmoji: string; resolveButtonLabel: string; reopenButtonLabel: string; resolveMessage: string; reopenMessage: string; reopenPromptMessage: string; followupPromptMessage: string; linkPromptMessage: string };
 }
 export interface Status {
   webhookUrl: string;
@@ -60,6 +60,7 @@ export interface Bridge {
   resolveMessage: string | null;
   reopenMessage: string | null;
   reopenPromptMessage: string | null;
+  followupPromptMessage: string | null;
   requireLink: boolean;
   linkPromptMessage: string | null;
   enabled: boolean;
@@ -118,6 +119,7 @@ export interface BridgeCheck {
     resolveMessage: boolean;
     reopenMessage: boolean;
     reopenPromptMessage: boolean;
+    followupPromptMessage: boolean;
     requireLink: boolean;
     linkPromptMessage: boolean;
   };

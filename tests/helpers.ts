@@ -117,6 +117,7 @@ export interface BridgeOverrides {
   resolvedEmoji?: string | null;
   welcomeMessage?: string | null;
   reopenPromptMessage?: string | null;
+  followupPromptMessage?: string | null;
   requireLink?: boolean;
   linkPromptMessage?: string | null;
   resolveButtonLabel?: string | null;
@@ -168,6 +169,8 @@ export async function addBridge(ctx: TestContext, over: BridgeOverrides, chatwoo
     reopenMessage: "Thread reopened.",
     reopenPromptMessage:
       over.reopenPromptMessage === undefined ? "Your message reopened this help ticket. Do you have a question, or is it accidental?" : over.reopenPromptMessage,
+    // Off unless a test asks for it: most tests post several top-level messages as one user.
+    followupPromptMessage: over.followupPromptMessage ?? null,
     requireLink: over.requireLink ?? false,
     linkPromptMessage: over.linkPromptMessage === undefined ? "Before you can post here, link your Slack account: {link}" : over.linkPromptMessage,
     chatwootApiTokenEnc: encryptToken("service-token", TEST_KEY),

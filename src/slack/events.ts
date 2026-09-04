@@ -7,10 +7,49 @@ import { describeSlackRequest, recordTraffic } from "../diagnostics.js";
 import type { Agent, Thread } from "../db/schema.js";
 import { log } from "../logger.js";
 import { PermanentError } from "../retry.js";
-import { allFilesRelayed, findAgentBySlackUser, findThreadBySlack, hasLinkedSlackAccount, insertThread, isRelayedSlack, markEventSeen, markThreadDeleted, recordRelayed, setWelcomeMessageTs } from "../store.js";
+import {
+  BROADCAST_NOTICE_MESSAGE,
+  FOLLOWUP_ALREADY_SENT_MESSAGE,
+  FOLLOWUP_PROMPT_TIMEOUT_MS,
+  FOLLOWUP_PROMPT_WINDOW_MS,
+  FOLLOWUP_RELATED_MESSAGE,
+  FOLLOWUP_SEPARATE_MESSAGE,
+  REOPEN_PROMPT_TIMEOUT_MESSAGE,
+  REOPEN_PROMPT_TIMEOUT_MS,
+} from "../messages.js";
+import {
+  allFilesRelayed,
+  answerHeldMessage,
+  clearReopenPrompt,
+  findHeldMessage,
+  findRecentThreadByAuthor,
+  holdMessage,
+  findAgentBySlackUser,
+  findThreadBySlack,
+  hasLinkedSlackAccount,
+  insertThread,
+  isRelayedSlack,
+  markEventSeen,
+  markThreadDeleted,
+  recordRelayed,
+  setReopenPrompt,
+  setWelcomeMessageTs,
+} from "../store.js";
 import { downloadSlackFiles, type SlackFileRef } from "./files.js";
-import { buttonForStatus, KEEP_OPEN_ACTION_ID, messageBlocks, NOT_A_QUESTION_ACTION_ID, parseButtonValue, reopenPromptBlocks, RESOLVE_ACTION_ID, type ButtonAction } from "./blocks.js";
-import { BRIDGE_METADATA_EVENT, deleteBridgeOnlyThread, postEphemeralInThread, postSystemMessage } from "./post.js";
+import {
+  buttonForStatus,
+  FOLLOWUP_RELATED_ACTION_ID,
+  FOLLOWUP_SEPARATE_ACTION_ID,
+  followupPromptBlocks,
+  KEEP_OPEN_ACTION_ID,
+  messageBlocks,
+  NOT_A_QUESTION_ACTION_ID,
+  parseButtonValue,
+  reopenPromptBlocks,
+  RESOLVE_ACTION_ID,
+  type ButtonAction,
+} from "./blocks.js";
+import { BRIDGE_METADATA_EVENT, deleteBridgeOnlyThread, postEphemeral, postEphemeralInThread, postSystemMessage } from "./post.js";
 import { slackToChatwootText } from "./text.js";
 import { getSlackProfile, messageStillExists } from "./users.js";
 
@@ -18,6 +57,10 @@ export const JOB_SLACK_MESSAGE = "slack_message";
 export const JOB_SLACK_REACTION = "slack_reaction";
 export const JOB_THREAD_DELETED = "slack_thread_deleted";
 export const JOB_LINK_REQUIRED = "slack_link_required";
+export const JOB_REOPEN_TIMEOUT = "slack_reopen_timeout";
+export const JOB_BROADCAST_NOTICE = "slack_broadcast_notice";
+export const JOB_FOLLOWUP_PROMPT = "slack_followup_prompt";
+export const JOB_FOLLOWUP_TIMEOUT = "slack_followup_timeout";
 
 /** The subset of a Slack message event we persist into the retry payload. */
 export interface SlackMessageJob extends Record<string, unknown> {
@@ -79,6 +122,41 @@ export interface LinkRequiredJob extends Record<string, unknown> {
   user: string;
 }
 
+/** Scheduled when the reopen prompt goes out; resolves the ticket again if nobody answered. */
+export interface ReopenTimeoutJob extends Record<string, unknown> {
+  channel: string;
+  threadTs: string;
+  /** Whose reply reopened the ticket, and who was asked about it. */
+  user: string;
+  /** The prompt this job belongs to; a newer prompt on the same thread supersedes it. */
+  promptedAt: string;
+}
+
+/**
+ * A new top-level question whose ticket is on hold while its sender says whether it really is a
+ * new question. Carries the relay job so answering "separate" is just running it.
+ */
+export interface FollowupPromptJob extends Record<string, unknown> {
+  channel: string;
+  ts: string;
+  user: string;
+  priorThreadTs: string;
+  message: SlackMessageJob;
+}
+
+/** Nobody answered a hold; the message goes through as a question of its own. */
+export interface FollowupTimeoutJob extends Record<string, unknown> {
+  channel: string;
+  ts: string;
+}
+
+/** Someone replied with "Also send to #channel" ticked; ask them, privately, to remove the copy. */
+export interface BroadcastNoticeJob extends Record<string, unknown> {
+  channel: string;
+  threadTs: string;
+  user: string;
+}
+
 export interface IncomingSlackReaction {
   type: "reaction_added";
   user: string;
@@ -113,6 +191,16 @@ export async function acceptSlackMessage(ctx: AppContext, eventId: string, msg: 
   if (msg.metadata?.event_type === BRIDGE_METADATA_EVENT) return "bridge-posted message";
   if (!msg.user) return "no user";
   if (!(await markEventSeen(ctx.db, eventId))) return "duplicate event";
+  // "Also send to #channel" copies the reply into the channel proper, outside the thread. The
+  // bridge can't delete someone else's message, so ask them to. The reply itself is relayed as
+  // usual; this only concerns the copy Slack left in the channel.
+  if (msg.subtype === "thread_broadcast" && msg.thread_ts && (await findThreadBySlack(ctx.db, msg.channel, msg.thread_ts))) {
+    void ctx.retry.runOrEnqueue(JOB_BROADCAST_NOTICE, {
+      channel: msg.channel,
+      threadTs: msg.thread_ts,
+      user: msg.user,
+    } satisfies BroadcastNoticeJob);
+  }
   // Bridges that require a linked account relay nothing from anyone who has not been through
   // /link. There is no anonymous route in that case; the sender is told privately instead.
   if (bridge.row.requireLink && !(await hasLinkedSlackAccount(ctx.db, msg.user))) {
@@ -138,9 +226,31 @@ export async function acceptSlackMessage(ctx: AppContext, eventId: string, msg: 
       url_private: f.url_private,
     }));
   }
+  // Two questions in the channel minutes apart, from the same person, is nearly always a follow-up
+  // that belonged in the first thread. Ask before opening a second ticket; nothing is relayed and
+  // no welcome message goes out until they answer or the hold times out.
+  const prior =
+    bridge.row.followupPromptMessage && !isReplyTo(msg)
+      ? await findRecentThreadByAuthor(ctx.db, msg.channel, msg.user, new Date(Date.now() - FOLLOWUP_PROMPT_WINDOW_MS))
+      : undefined;
+  if (prior && prior.slackThreadTs !== msg.ts) {
+    void ctx.retry.runOrEnqueue(JOB_FOLLOWUP_PROMPT, {
+      channel: msg.channel,
+      ts: msg.ts,
+      user: msg.user,
+      priorThreadTs: prior.slackThreadTs,
+      message: job,
+    } satisfies FollowupPromptJob);
+    return "held: may be a follow-up to a recent question";
+  }
   // Fire and forget: the Slack request is already acked by Bolt; failures land in `retries`.
   void ctx.retry.runOrEnqueue(JOB_SLACK_MESSAGE, job);
   return null;
+}
+
+/** True for a thread reply, as opposed to a message that starts (or could start) a thread. */
+function isReplyTo(msg: IncomingSlackMessage): boolean {
+  return Boolean(msg.thread_ts && msg.thread_ts !== msg.ts);
 }
 
 /**
@@ -248,6 +358,73 @@ export async function noteLinkRequired(ctx: AppContext, job: LinkRequiredJob): P
   await postEphemeralInThread(bridge, job.channel, job.threadTs, job.user, text);
 }
 
+/** Private nudge to someone who also broadcast their thread reply to the channel. */
+export async function noteThreadBroadcast(ctx: AppContext, job: BroadcastNoticeJob): Promise<void> {
+  const bridge = ctx.bridges.forChannel(job.channel);
+  if (!bridge) throw new PermanentError(`no bridge for channel ${job.channel}`);
+  await postEphemeralInThread(bridge, job.channel, job.threadTs, job.user, BROADCAST_NOTICE_MESSAGE);
+}
+
+/**
+ * Park a possible follow-up and ask its sender which it is. The prompt goes in the channel rather
+ * than the message's own thread: they have not opened that thread, and would not see it there.
+ */
+export async function askAboutFollowup(ctx: AppContext, job: FollowupPromptJob): Promise<void> {
+  const bridge = ctx.bridges.forChannel(job.channel);
+  if (!bridge) throw new PermanentError(`no bridge for channel ${job.channel}`);
+  const prompt = bridge.row.followupPromptMessage;
+  // The admin turned the check off between the message arriving and this running: let it through.
+  if (!prompt) return void (await ctx.retry.runOrEnqueue(JOB_SLACK_MESSAGE, job.message));
+
+  const held =
+    (await holdMessage(ctx.db, {
+      slackChannel: job.channel,
+      slackTs: job.ts,
+      slackUser: job.user,
+      priorThreadTs: job.priorThreadTs,
+      payload: job.message,
+    })) ?? (await findHeldMessage(ctx.db, job.channel, job.ts));
+  if (held?.answeredAt) return; // a retry of a hold that has already run its course
+
+  await postEphemeral(bridge, job.channel, job.user, prompt, followupPromptBlocks(prompt, job.ts));
+  await ctx.retry.schedule(JOB_FOLLOWUP_TIMEOUT, { channel: job.channel, ts: job.ts } satisfies FollowupTimeoutJob, FOLLOWUP_PROMPT_TIMEOUT_MS);
+  log.info("held a possible follow-up", { bridge: bridge.row.name, channel: job.channel, ts: job.ts, user: job.user });
+}
+
+/**
+ * The hold went unanswered. Silence is not a reason to drop someone's question, so treat it as a
+ * new one and relay it. First-wins on the answer, so a click landing at the same moment still wins.
+ */
+export async function releaseUnansweredFollowup(ctx: AppContext, job: FollowupTimeoutJob): Promise<void> {
+  const held = await findHeldMessage(ctx.db, job.channel, job.ts);
+  if (!held || held.answeredAt) return;
+  if (!(await answerHeldMessage(ctx.db, held.id, "timeout"))) return;
+  log.info("releasing an unanswered follow-up hold", { channel: job.channel, ts: job.ts });
+  await ctx.retry.runOrEnqueue(JOB_SLACK_MESSAGE, held.payload as SlackMessageJob);
+}
+
+/**
+ * A click on the follow-up prompt. Returns what to show the clicker; "separate" releases the held
+ * message, "related" drops it and asks them to move it into their earlier thread.
+ */
+export async function acceptFollowupAnswer(
+  ctx: AppContext,
+  click: { channel: string; ts: string; user: string; answer: "separate" | "related" },
+): Promise<string> {
+  const held = await findHeldMessage(ctx.db, click.channel, click.ts);
+  if (!held) return "That message isn't waiting on an answer any more.";
+  if (held.slackUser !== click.user) return "Only the person who sent that message can answer this.";
+  const answered = await answerHeldMessage(ctx.db, held.id, click.answer);
+  // Already decided: by the timeout, or by a double-click on the other button.
+  if (!answered) return held.answer === "related" ? FOLLOWUP_RELATED_MESSAGE : FOLLOWUP_ALREADY_SENT_MESSAGE;
+  if (click.answer === "related") {
+    log.info("dropped a follow-up posted outside its thread", { channel: click.channel, ts: click.ts, user: click.user });
+    return FOLLOWUP_RELATED_MESSAGE;
+  }
+  await ctx.retry.runOrEnqueue(JOB_SLACK_MESSAGE, held.payload as SlackMessageJob);
+  return FOLLOWUP_SEPARATE_MESSAGE;
+}
+
 /** Relay one Slack message into Chatwoot. Idempotent: safe to run again from the retry queue. */
 export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, graceMs = SLACK_ECHO_GRACE_MS): Promise<void> {
   const { db, hub } = ctx;
@@ -329,6 +506,8 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, g
     const agent = await findAgentBySlackUser(db, job.user);
     let messageId: number;
     if (agent?.chatwootAgentId) {
+      // A helper has stepped in, so the ticket stays open whatever the reopen prompt was waiting for.
+      if (thread.reopenPromptAt) await clearReopenPrompt(db, thread.id);
       // Linked agent: outgoing message attributed to them via their own API token.
       const apiToken = await agentChatwootToken(ctx, agent);
       const content = apiToken ? text : `**${author.name}:** ${text}`; // no token -> service agent posts, so name them
@@ -341,15 +520,35 @@ export async function relaySlackMessage(ctx: AppContext, job: SlackMessageJob, g
       messageId = message.id;
       // Chatwoot reopens a resolved conversation on any incoming message, so this reply just did.
       // Ask the sender, privately, whether they meant to. Only they can see or answer it.
-      if (thread.lastStatus === "resolved" && bridge.row.reopenPromptMessage) {
-        await postEphemeralInThread(
-          bridge,
-          job.channel,
-          thread.slackThreadTs,
-          job.user,
-          bridge.row.reopenPromptMessage,
-          reopenPromptBlocks(bridge.row.reopenPromptMessage, thread.slackThreadTs),
-        ).catch((err) => log.warn("could not ask about the reopen", { channel: job.channel, error: err instanceof Error ? err.message : String(err) }));
+      // A further reply while the question is still pending doesn't ask again — they have already
+      // seen it, and the ticket is open either way — but it does restart the answer clock.
+      if (bridge.row.reopenPromptMessage && (thread.lastStatus === "resolved" || thread.reopenPromptAt)) {
+        const asked =
+          thread.lastStatus !== "resolved" ||
+          (await postEphemeralInThread(
+            bridge,
+            job.channel,
+            thread.slackThreadTs,
+            job.user,
+            bridge.row.reopenPromptMessage,
+            reopenPromptBlocks(bridge.row.reopenPromptMessage, thread.slackThreadTs),
+          ).then(
+            () => true,
+            (err) => {
+              log.warn("could not ask about the reopen", { channel: job.channel, error: err instanceof Error ? err.message : String(err) });
+              return false;
+            },
+          ));
+        // Nobody answers most of these, and an unanswered question is not a reason to keep a
+        // ticket open: no answer means "no, I don't have a question".
+        if (asked) {
+          const promptedAt = await setReopenPrompt(db, thread.id, job.user);
+          await ctx.retry.schedule(
+            JOB_REOPEN_TIMEOUT,
+            { channel: job.channel, threadTs: thread.slackThreadTs, user: job.user, promptedAt: promptedAt.toISOString() } satisfies ReopenTimeoutJob,
+            REOPEN_PROMPT_TIMEOUT_MS,
+          );
+        }
       }
     }
     await recordRelayed(db, { slackChannel: job.channel, slackTs: job.ts, chatwootMessageId: messageId, direction: "slack_to_chatwoot" });
@@ -366,6 +565,8 @@ export async function applySlackReaction(ctx: AppContext, job: SlackReactionJob)
   if (!thread) throw new PermanentError("thread vanished");
   const agent = await findAgentBySlackUser(ctx.db, job.user);
   const apiToken = await agentChatwootToken(ctx, agent);
+  // Whichever way this arrived, the thread's state has now been decided by a human.
+  if (thread.reopenPromptAt) await clearReopenPrompt(ctx.db, thread.id);
 
   try {
     if (job.action === "assign") {
@@ -411,12 +612,50 @@ async function contactSideStatus(bridge: Bridge, thread: Thread): Promise<string
   return convs.find((c) => c.id === thread.chatwootConversationId)?.status;
 }
 
+/**
+ * The reopen prompt went unanswered. Treat silence as "no, I don't have a question" and resolve the
+ * ticket again, exactly as the green button would have. Idempotent: the marker on the thread is the
+ * only thing that authorizes this, and it is cleared the moment anyone answers or steps in.
+ */
+export async function resolveUnansweredReopen(ctx: AppContext, job: ReopenTimeoutJob): Promise<void> {
+  const bridge = ctx.bridges.forChannel(job.channel);
+  if (!bridge) throw new PermanentError(`no bridge for channel ${job.channel}`);
+  const thread = await findThreadBySlack(ctx.db, job.channel, job.threadTs);
+  if (!thread || thread.deletedAt) return;
+  // Answered, superseded by a later prompt on the same thread, or cancelled by a helper.
+  if (thread.reopenPromptAt?.getTime() !== new Date(job.promptedAt).getTime()) return;
+
+  const refusal = await checkResolvePermission(ctx, thread, job.user);
+  if (refusal) {
+    // The sender could not have resolved it by clicking either, so leave it open for a helper.
+    await clearReopenPrompt(ctx.db, thread.id);
+    log.info("leaving an unanswered reopen alone", { reason: refusal, channel: job.channel, ts: job.threadTs, user: job.user });
+    return;
+  }
+
+  const agent = await findAgentBySlackUser(ctx.db, job.user);
+  try {
+    await resolveConversation(bridge, thread, agent, await agentChatwootToken(ctx, agent));
+  } catch (err) {
+    permanentIf4xx(err); // still marked pending, so a retry will pick it up again
+  }
+  await clearReopenPrompt(ctx.db, thread.id);
+  log.info("resolved conversation", { bridge: bridge.row.name, conversationId: thread.chatwootConversationId, by: job.user, via: "reopen timeout" });
+  await postEphemeralInThread(bridge, job.channel, job.threadTs, job.user, REOPEN_PROMPT_TIMEOUT_MESSAGE).catch((err) =>
+    log.warn("could not report the timed-out reopen", { channel: job.channel, error: err instanceof Error ? err.message : String(err) }),
+  );
+}
+
 /** Register the retry-job handlers once per process. */
 export function registerSlackJobs(ctx: AppContext): void {
   ctx.retry.register(JOB_SLACK_MESSAGE, (payload) => relaySlackMessage(ctx, payload as SlackMessageJob));
   ctx.retry.register(JOB_SLACK_REACTION, (payload) => applySlackReaction(ctx, payload as SlackReactionJob));
   ctx.retry.register(JOB_THREAD_DELETED, (payload) => noteThreadDeleted(ctx, payload as ThreadDeletedJob));
   ctx.retry.register(JOB_LINK_REQUIRED, (payload) => noteLinkRequired(ctx, payload as LinkRequiredJob));
+  ctx.retry.register(JOB_REOPEN_TIMEOUT, (payload) => resolveUnansweredReopen(ctx, payload as ReopenTimeoutJob));
+  ctx.retry.register(JOB_BROADCAST_NOTICE, (payload) => noteThreadBroadcast(ctx, payload as BroadcastNoticeJob));
+  ctx.retry.register(JOB_FOLLOWUP_PROMPT, (payload) => askAboutFollowup(ctx, payload as unknown as FollowupPromptJob));
+  ctx.retry.register(JOB_FOLLOWUP_TIMEOUT, (payload) => releaseUnansweredFollowup(ctx, payload as FollowupTimeoutJob));
 }
 
 /** Attach listeners to one bridge's Bolt app. Events are still validated against the channel mapping. */
@@ -480,13 +719,39 @@ export function registerSlackEvents(app: App, ctx: AppContext, bridgeId: number)
 
   app.action({ action_id: KEEP_OPEN_ACTION_ID }, async ({ ack, body, respond }) => {
     await ack();
-    // Nothing to do: Chatwoot has already reopened it. Just acknowledge, privately.
+    const b = body as unknown as { user?: { id?: string }; channel?: { id?: string }; trigger_id?: string; actions?: { value?: string }[] };
+    const channel = b.channel?.id;
+    const user = b.user?.id;
+    const threadTs = b.actions?.[0]?.value;
+    if (!channel || !user || !threadTs) return;
+    // Chatwoot has usually reopened it already, but the prompt may have timed out first and resolved
+    // it again. Ask for a reopen either way: it only flips a ticket that really is resolved.
+    const problem = await acceptResolveButton(ctx, { channel, threadTs, user, action: "reopen", triggerId: b.trigger_id ?? `${channel}:${threadTs}:${user}` });
     await respond({
       response_type: "ephemeral",
       replace_original: true,
-      text: "Kept open. A helper will take a look.",
+      text: problem ?? "Kept open. A helper will take a look.",
     }).catch((err) => log.warn("could not answer the reopen prompt", { error: err instanceof Error ? err.message : String(err) }));
   });
+
+  // Answers to "is this a separate question?". Both buttons carry the held message's ts.
+  for (const [actionId, answer] of [
+    [FOLLOWUP_SEPARATE_ACTION_ID, "separate"],
+    [FOLLOWUP_RELATED_ACTION_ID, "related"],
+  ] as const) {
+    app.action({ action_id: actionId }, async ({ ack, body, respond }) => {
+      await ack();
+      const b = body as unknown as { user?: { id?: string }; channel?: { id?: string }; actions?: { value?: string }[] };
+      const channel = b.channel?.id;
+      const user = b.user?.id;
+      const ts = b.actions?.[0]?.value;
+      if (!channel || !user || !ts) return;
+      const text = await acceptFollowupAnswer(ctx, { channel, ts, user, answer });
+      await respond({ response_type: "ephemeral", replace_original: true, text }).catch((err) =>
+        log.warn("could not answer the follow-up prompt", { error: err instanceof Error ? err.message : String(err) }),
+      );
+    });
+  }
 
   app.event("reaction_added", async ({ event, body }) => {
     const eventId = (body as { event_id?: string }).event_id ?? `${event.event_ts}`;

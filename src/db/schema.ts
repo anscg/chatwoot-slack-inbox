@@ -38,6 +38,11 @@ export const bridges = pgTable(
     reopenMessage: text("reopen_message"),
     /** Private prompt shown to someone whose reply reopened a resolved ticket; null disables. */
     reopenPromptMessage: text("reopen_prompt_message"),
+    /**
+     * Private prompt shown to someone who posts a second question in the channel soon after their
+     * first, asking whether it is really separate; null disables the whole check.
+     */
+    followupPromptMessage: text("followup_prompt_message"),
     /** When on, nothing a Slack user writes is relayed until they have linked their account at /link. */
     requireLink: boolean("require_link").notNull().default(false),
     /** Private nudge shown to an unlinked sender whose message was held back; null stays silent. */
@@ -66,6 +71,12 @@ export const threads = pgTable(
     statusMessageTs: text("status_message_ts"),
     /** ts of the bot's welcome message, so its button can be re-labelled when the status changes. */
     welcomeMessageTs: text("welcome_message_ts"),
+    /**
+     * Set while the "did you mean to reopen this?" prompt is waiting for an answer. The timestamp
+     * doubles as the token the timeout job matches on, so a newer prompt supersedes an older job.
+     */
+    reopenPromptAt: timestamp("reopen_prompt_at", { withTimezone: true }),
+    reopenPromptUser: text("reopen_prompt_user"),
     /** Set when the Slack message that started the thread is deleted; nothing is relayed after that. */
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -132,6 +143,28 @@ export const relayedFiles = pgTable("relayed_files", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * A top-level Slack message whose ticket is on hold while its sender answers "is this separate from
+ * your last question?". Holds the relay job verbatim, so answering "separate" just runs it.
+ */
+export const heldMessages = pgTable(
+  "held_messages",
+  {
+    id: serial("id").primaryKey(),
+    slackChannel: text("slack_channel").notNull(),
+    slackTs: text("slack_ts").notNull(),
+    slackUser: text("slack_user").notNull(),
+    /** The earlier question of theirs that prompted the check. */
+    priorThreadTs: text("prior_thread_ts").notNull(),
+    payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
+    /** Set once the prompt is answered, by a click or by the timeout. */
+    answeredAt: timestamp("answered_at", { withTimezone: true }),
+    answer: text("answer", { enum: ["separate", "related", "timeout"] }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("held_messages_slack_uq").on(t.slackChannel, t.slackTs)],
+);
+
 export const retries = pgTable(
   "retries",
   {
@@ -150,3 +183,4 @@ export type BridgeRow = typeof bridges.$inferSelect;
 export type Thread = typeof threads.$inferSelect;
 export type Agent = typeof agents.$inferSelect;
 export type Retry = typeof retries.$inferSelect;
+export type HeldMessage = typeof heldMessages.$inferSelect;

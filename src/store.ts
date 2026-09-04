@@ -1,6 +1,6 @@
-import { and, eq, inArray, lt } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt } from "drizzle-orm";
 import type { Db } from "./db/client.js";
-import { agents, relayed, relayedFiles, seenEvents, threads, type Agent, type Thread } from "./db/schema.js";
+import { agents, heldMessages, relayed, relayedFiles, seenEvents, threads, type Agent, type HeldMessage, type Thread } from "./db/schema.js";
 
 export const SEEN_EVENT_TTL_MS = 24 * 60 * 60_000;
 
@@ -128,4 +128,61 @@ export async function setWelcomeMessageTs(db: Db, threadId: number, ts: string):
 
 export async function setThreadStatus(db: Db, threadId: number, patch: { lastStatus: string; statusMessageTs: string | null }): Promise<void> {
   await db.update(threads).set(patch).where(eq(threads.id, threadId));
+}
+
+/** Mark the thread as waiting for an answer to the reopen prompt. Returns the token to match on. */
+export async function setReopenPrompt(db: Db, threadId: number, user: string, at = new Date()): Promise<Date> {
+  await db.update(threads).set({ reopenPromptAt: at, reopenPromptUser: user }).where(eq(threads.id, threadId));
+  return at;
+}
+
+/** The prompt has been answered, superseded, or overtaken by a helper; stop the pending timeout. */
+export async function clearReopenPrompt(db: Db, threadId: number): Promise<void> {
+  await db.update(threads).set({ reopenPromptAt: null, reopenPromptUser: null }).where(eq(threads.id, threadId));
+}
+
+/** Their most recent live question in this channel, if they asked one since `since`. */
+export async function findRecentThreadByAuthor(db: Db, channel: string, slackUserId: string, since: Date): Promise<Thread | undefined> {
+  const rows = await db
+    .select()
+    .from(threads)
+    .where(
+      and(
+        eq(threads.slackChannel, channel),
+        eq(threads.slackAuthorId, slackUserId),
+        isNull(threads.deletedAt),
+        gte(threads.createdAt, since),
+      ),
+    )
+    .orderBy(desc(threads.createdAt))
+    .limit(1);
+  return rows[0];
+}
+
+/** Park a relay job until its sender says whether the message is a new question. */
+export async function holdMessage(db: Db, row: typeof heldMessages.$inferInsert): Promise<HeldMessage | undefined> {
+  const rows = await db.insert(heldMessages).values(row).onConflictDoNothing().returning();
+  return rows[0];
+}
+
+export async function findHeldMessage(db: Db, channel: string, ts: string): Promise<HeldMessage | undefined> {
+  const rows = await db
+    .select()
+    .from(heldMessages)
+    .where(and(eq(heldMessages.slackChannel, channel), eq(heldMessages.slackTs, ts)))
+    .limit(1);
+  return rows[0];
+}
+
+/**
+ * Record the answer to a hold, but only the first one: a click and the timeout can race, and
+ * whichever lands first decides. Returns the row when this call is the one that answered it.
+ */
+export async function answerHeldMessage(db: Db, id: number, answer: "separate" | "related" | "timeout"): Promise<HeldMessage | undefined> {
+  const rows = await db
+    .update(heldMessages)
+    .set({ answer, answeredAt: new Date() })
+    .where(and(eq(heldMessages.id, id), isNull(heldMessages.answeredAt)))
+    .returning();
+  return rows[0];
 }

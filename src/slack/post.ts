@@ -271,6 +271,11 @@ export async function updateSystemMessage(bridge: Bridge, channel: string, ts: s
   await bridge.slack.chat.update({ channel, ts, text, blocks });
 }
 
+/** A private notice in the channel itself, where the sender will see it without opening a thread. */
+export async function postEphemeral(bridge: Bridge, channel: string, user: string, text: string, blocks?: KnownBlock[]): Promise<void> {
+  await bridge.slack.chat.postEphemeral({ channel, user, text, ...(blocks ? { blocks } : {}) });
+}
+
 /**
  * Private, in-thread feedback to one person. `respond()` via an interaction's response_url lands in
  * the channel rather than the thread, so post the ephemeral message explicitly instead. Not
