@@ -46,6 +46,17 @@ export class RetryQueue {
   }
 
   /**
+   * Run a job later rather than now: same queue, same retry behaviour once it fires, but the first
+   * attempt is simply deferred. Used for the reopen prompt's answer timeout.
+   */
+  async schedule(kind: string, payload: Record<string, unknown>, delayMs: number): Promise<void> {
+    if (!this.handlers.has(kind)) log.warn("scheduling a job with no registered handler", { kind });
+    const next = new Date(Date.now() + delayMs);
+    await this.db.insert(retries).values({ kind, payload, attempts: 0, nextAttemptAt: next });
+    log.debug("scheduled job", { kind, nextAttemptAt: next.toISOString() });
+  }
+
+  /**
    * Run `fn` now; on failure enqueue for retry (unless permanent). Never throws.
    * Use this as the entry point for every outbound side-effect.
    */

@@ -6,7 +6,7 @@ import { PermanentError } from "../retry.js";
 import { buttonForStatus, messageBlocks } from "../slack/blocks.js";
 import { deleteSystemMessage, postSystemMessage, postToSlackThread, resolvePostIdentity, setBotReaction, SlackUploadUnavailable, ThreadGone, updateSystemMessage, uploadToSlackThread, type ChatwootSenderRef, type UploadFile } from "../slack/post.js";
 import { chatwootToSlackText } from "../slack/text.js";
-import { findThreadByConversation, isRelayedChatwoot, markThreadDeleted, recordRelayed, recordRelayedFiles, setThreadStatus } from "../store.js";
+import { clearReopenPrompt, findThreadByConversation, isRelayedChatwoot, markThreadDeleted, recordRelayed, recordRelayedFiles, setThreadStatus } from "../store.js";
 
 const MAX_ATTACHMENT_BYTES = 40 * 1024 * 1024;
 
@@ -124,6 +124,8 @@ export async function relayChatwootMessage(ctx: AppContext, job: ChatwootMessage
   }
   const bridge = ctx.bridges.forChannel(thread.slackChannel);
   if (!bridge) throw new PermanentError(`no enabled bridge for channel ${thread.slackChannel}`);
+  // A helper is answering, so an unanswered "did you mean to reopen this?" must not resolve it.
+  if (thread.reopenPromptAt) await clearReopenPrompt(ctx.db, thread.id);
 
   let text = chatwootToSlackText(job.content);
   const identity = await resolvePostIdentity(ctx, job.sender);
