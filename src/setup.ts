@@ -22,7 +22,7 @@ export function registerSetupRoutes(router: Router, config: Config): void {
 <li><a class="btn" href="/setup/hub-manifest.yml">Download hub manifest</a> (pre-filled with this server's URLs)</li>
 <li>At <a href="https://api.slack.com/apps?new_app=1">api.slack.com/apps</a> choose <em>Create New App → From a manifest</em>, pick your workspace, paste the file's contents.</li>
 <li><em>Install to Workspace</em>. Copy the <strong>Bot User OAuth Token</strong> (OAuth &amp; Permissions) and the <strong>Client ID</strong> / <strong>Client Secret</strong> (Basic Information).</li>
-<li>Set them as <code>SLACK_BOT_TOKEN</code>, <code>SLACK_CLIENT_ID</code>, <code>SLACK_CLIENT_SECRET</code> on the server and restart. Put the admins' Slack user IDs in <code>ADMIN_SLACK_USER_IDS</code>.</li>
+<li>Set them as <code>SLACK_BOT_TOKEN</code>, <code>SLACK_CLIENT_ID</code>, <code>SLACK_CLIENT_SECRET</code> on the server and restart. Put the first superadmins' Slack user IDs in <code>ADMIN_SLACK_USER_IDS</code> &mdash; that is read only until a superadmin exists; everyone after that is invited from the panel's <em>People</em> page.</li>
 </ol>
 <h2>2. Open the control panel</h2>
 <p><a href="/admin/">${esc(config.PUBLIC_URL)}/admin/</a> → Sign in with Slack → <em>New bridge</em>. The form generates the per-team Slack app manifest for you.</p>

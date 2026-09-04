@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { api, type Bridge, type BridgeCheck, type Introspection, type Me, type SlackIntrospection } from "../api";
-import { Copy, useResource } from "./common";
+import { api, type Bridge, type BridgeCheck, type BridgeMembers, type BridgeRole, type Introspection, type Me, type SlackIntrospection } from "../api";
+import { Copy, fmtDate, useResource } from "./common";
 
 interface Draft {
   name: string;
@@ -86,20 +86,30 @@ export function Bridges({ me }: { me: Me }) {
   const [editing, setEditing] = useState<Bridge | "new" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [check, setCheck] = useState<BridgeCheck | "loading" | null>(null);
+  const [members, setMembers] = useState<Bridge | null>(null);
 
   return (
     <>
       <div className="panel">
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h2 style={{ margin: 0 }}>Bridges</h2>
-          <button className="primary" onClick={() => setEditing("new")}>
-            New bridge
-          </button>
+          {me.can.createBridge && (
+            <button className="primary" onClick={() => setEditing("new")}>
+              New bridge
+            </button>
+          )}
         </div>
-        <p className="note">Each bridge is one Slack channel, one Slack app (its own bot), and one Chatwoot API inbox in some account.</p>
+        <p className="note">
+          Each bridge is one Slack channel, one Slack app (its own bot), and one Chatwoot API inbox in some account.{" "}
+          {me.user.role === "superadmin"
+            ? "You see every bridge on this install."
+            : "You see the bridges you run. Whoever creates a bridge is its admin and invites their own operators."}
+        </p>
         {error && <p className="err">{error}</p>}
         {notice && <p className="err">{notice}</p>}
-        {data && data.length === 0 && <p className="muted">No bridges yet.</p>}
+        {data && data.length === 0 && (
+          <p className="muted">{me.can.createBridge ? "No bridges yet." : "No bridges yet — ask a program's admin to add you to theirs."}</p>
+        )}
         {data && data.length > 0 && (
           <table>
             <thead>
@@ -109,6 +119,7 @@ export function Bridges({ me }: { me: Me }) {
                 <th>Chatwoot</th>
                 <th>Reactions</th>
                 <th>Status</th>
+                <th>You</th>
                 <th></th>
               </tr>
             </thead>
@@ -141,6 +152,9 @@ export function Bridges({ me }: { me: Me }) {
                     {b.reopenButtonLabel ? <code>{b.reopenButtonLabel}</code> : <span className="pill off">off</span>}
                   </td>
                   <td>{b.enabled ? <span className="pill ok">enabled</span> : <span className="pill off">disabled</span>}</td>
+                  <td>
+                    <span className="pill">{b.yourRole ?? "—"}</span>
+                  </td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                     <button
                       className="small"
@@ -159,16 +173,25 @@ export function Bridges({ me }: { me: Me }) {
                     <button className="small" onClick={() => setEditing(b)}>
                       Edit
                     </button>{" "}
-                    <button
-                      className="small danger"
-                      onClick={async () => {
-                        if (!confirm(`Delete bridge "${b.name}"? Existing thread mappings stay in the database.`)) return;
-                        await api.del(`/bridges/${b.id}`);
-                        reload();
-                      }}
-                    >
-                      Delete
-                    </button>
+                    <button className="small" onClick={() => setMembers(b)}>
+                      People
+                    </button>{" "}
+                    {b.yourRole === "admin" && (
+                      <button
+                        className="small danger"
+                        onClick={async () => {
+                          if (!confirm(`Delete bridge "${b.name}"? Existing thread mappings stay in the database.`)) return;
+                          try {
+                            await api.del(`/bridges/${b.id}`);
+                            reload();
+                          } catch (e) {
+                            setNotice((e as Error).message);
+                          }
+                        }}
+                      >
+                        Delete
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -177,6 +200,7 @@ export function Bridges({ me }: { me: Me }) {
         )}
       </div>
       {check && <CheckPanel check={check} onClose={() => setCheck(null)} />}
+      {members && <MembersPanel bridge={members} onClose={() => setMembers(null)} />}
       {editing && (
         <BridgeForm
           me={me}
@@ -605,5 +629,116 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
         </button>
       </div>
     </form>
+  );
+}
+
+
+/**
+ * Who runs one bridge. Its admins invite operators here — community members who can configure
+ * this bridge and nothing else — without a superadmin ever being in the loop.
+ */
+function MembersPanel({ bridge, onClose }: { bridge: Bridge; onClose: () => void }) {
+  const { data, error, reload } = useResource<BridgeMembers>(`/bridges/${bridge.id}/members`);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [slackUserId, setSlackUserId] = useState("");
+  const [role, setRole] = useState<BridgeRole>("operator");
+
+  const run = async (fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+      setNotice(null);
+      reload();
+    } catch (e) {
+      setNotice((e as Error).message);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h3 style={{ margin: 0 }}>People on {bridge.name}</h3>
+        <button className="small" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      {error && <p className="err">{error}</p>}
+      {notice && <p className="err">{notice}</p>}
+      {data && (
+        <>
+          <table>
+            <thead>
+              <tr>
+                <th>Person</th>
+                <th>Role</th>
+                <th>Added</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.members.map((m) => (
+                <tr key={m.slackUserId}>
+                  <td>
+                    <strong>{m.name ?? m.slackUserId}</strong>
+                    <div className="note mono">{m.slackUserId}</div>
+                  </td>
+                  <td>
+                    <span className="pill">{m.role}</span>
+                    <div className="note">
+                      {m.role === "admin" ? "configures this bridge, invites people, can delete it" : "configures this bridge; cannot invite or delete"}
+                    </div>
+                  </td>
+                  <td className="note">{fmtDate(m.createdAt)}</td>
+                  <td style={{ textAlign: "right" }}>
+                    {data.canInvite && (
+                      <button
+                        className="small danger"
+                        onClick={() => {
+                          if (!confirm(`Remove ${m.name ?? m.slackUserId} from ${bridge.name}?`)) return;
+                          void run(() => api.del(`/bridges/${bridge.id}/members/${m.slackUserId}`));
+                        }}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {data.members.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="muted">
+                    Nobody is assigned to this bridge yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+          {data.canInvite ? (
+            <form
+              className="row"
+              style={{ marginTop: 12 }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                void run(async () => {
+                  await api.post(`/bridges/${bridge.id}/members`, { slackUserId: slackUserId.trim(), role });
+                  setSlackUserId("");
+                });
+              }}
+            >
+              <input placeholder="Slack user ID, e.g. U0123456789" value={slackUserId} onChange={(e) => setSlackUserId(e.target.value)} required />
+              <select value={role} onChange={(e) => setRole(e.target.value as BridgeRole)}>
+                <option value="operator">operator — runs this bridge</option>
+                <option value="admin">admin — can also invite and delete</option>
+              </select>
+              <button className="primary">Add</button>
+            </form>
+          ) : (
+            <p className="note">Only this bridge&apos;s admins can add or remove people.</p>
+          )}
+          <p className="note" style={{ marginTop: 12 }}>
+            Superadmins reach every bridge without being listed here: {data.superadmins.map((s) => s.name ?? s.slackUserId).join(", ") || "none"}.
+          </p>
+        </>
+      )}
+    </div>
   );
 }

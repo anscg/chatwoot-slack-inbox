@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { WebClient } from "@slack/web-api";
 import express from "express";
+import { seedSuperadmins } from "./admin/access.js";
 import { registerAdminApi } from "./admin/api.js";
 import { BridgeRegistry } from "./bridges.js";
 import { ChatwootPlatformClient } from "./chatwoot/platform.js";
@@ -9,6 +10,7 @@ import { loadConfig } from "./config.js";
 import type { AppContext } from "./context.js";
 import { registerDashboardRoutes } from "./dashboard.js";
 import { createDb, runMigrations } from "./db/client.js";
+import { adminUsers } from "./db/schema.js";
 import { log, setLogLevel } from "./logger.js";
 import { RetryQueue } from "./retry.js";
 import { registerSlackEvents, registerSlackJobs } from "./slack/events.js";
@@ -23,6 +25,12 @@ async function main(): Promise<void> {
   const { db, pool } = createDb(config.DATABASE_URL);
   await runMigrations(db);
   log.info("migrations applied");
+
+  // First-run bootstrap: turn ADMIN_SLACK_USER_IDS into superadmins if the roster has none.
+  await seedSuperadmins(db, config.ADMIN_SLACK_USER_IDS);
+  if ((await db.select().from(adminUsers)).length === 0) {
+    log.warn("nobody can sign in to the control panel yet; set ADMIN_SLACK_USER_IDS and restart", { setupUrl: `${config.PUBLIC_URL}/setup` });
+  }
 
   // Hub app: admin sign-in, /link, user lookups. Bridges each bring their own bot.
   const hub = new WebClient(config.SLACK_BOT_TOKEN, { retryConfig: { retries: 2 } });

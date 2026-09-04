@@ -1,7 +1,10 @@
+import { eq } from "drizzle-orm";
 import type { Request, Response, Router } from "express";
 import { agentChatwootToken } from "../agents.js";
+import { loadActor } from "../admin/access.js";
 import type { AppContext } from "../context.js";
 import { encryptToken } from "../crypto.js";
+import { adminUsers } from "../db/schema.js";
 import { hcaAuthorizeUrl, hcaClient, hcaProfile } from "../hca.js";
 import { log } from "../logger.js";
 import { ADMIN_COOKIE, ADMIN_SESSION_TTL_MS, Signer, type AdminSession } from "../session.js";
@@ -219,13 +222,24 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
     }
     try {
       const { userId, userToken } = await exchangeCode(String(req.query.code ?? ""), adminRedirect);
-      if (!config.ADMIN_SLACK_USER_IDS.includes(userId)) {
+      // The roster is the gate: env-seeded superadmins plus everyone they and the bridge
+      // admins have since invited. Being in ADMIN_SLACK_USER_IDS only seeds a row at boot.
+      const actor = await loadActor(ctx.db, userId);
+      if (!actor) {
         log.warn("admin sign-in denied", { userId });
-        res.status(403).send(page("Not allowed", `<p>Slack user <code>${userId}</code> is not in <code>ADMIN_SLACK_USER_IDS</code>.</p>`));
+        res
+          .status(403)
+          .send(
+            page(
+              "Not allowed",
+              `<p>Slack user <code>${userId}</code> has not been given access to this control panel.</p><p>Ask whoever runs your program to invite you, or a superadmin to add you.</p>`,
+            ),
+          );
         return;
       }
       const profile = await getSlackProfile(ctx.hub, userId);
-      await linkAgent(userId, userToken, profile.email); // admins are usually agents too; no harm otherwise
+      await linkAgent(userId, userToken, profile.email); // panel users are usually agents too; no harm otherwise
+      await ctx.db.update(adminUsers).set({ name: profile.name, lastSeenAt: new Date() }).where(eq(adminUsers.slackUserId, userId));
       const session: AdminSession = { userId, name: profile.name };
       res.cookie(ADMIN_COOKIE, signer.sign(session, ADMIN_SESSION_TTL_MS), {
         httpOnly: true,

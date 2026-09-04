@@ -1,13 +1,27 @@
 import { WebClient } from "@slack/web-api";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, type SQL, sql } from "drizzle-orm";
+import type { PgColumn } from "drizzle-orm/pg-core";
 import express, { type NextFunction, type Request, type Response, type Router } from "express";
 import { z } from "zod";
 import { defaultAuthTest } from "../bridges.js";
+import {
+  type Actor,
+  type BridgeRole,
+  canAdministerBridge,
+  canConfigureBridge,
+  canCreateBridge,
+  bridgeRole,
+  isSuper,
+  loadActor,
+  rosterNames,
+  visibleBridgeIds,
+} from "./access.js";
 import { ChatwootClient, ChatwootHttpError } from "../chatwoot/client.js";
 import type { AppContext } from "../context.js";
+import type { Db } from "../db/client.js";
 import { recentTraffic } from "../diagnostics.js";
 import { encryptToken } from "../crypto.js";
-import { agents, bridges, relayed, retries, threads } from "../db/schema.js";
+import { adminUsers, agents, bridgeMembers, bridges, relayed, retries, threads } from "../db/schema.js";
 import { log } from "../logger.js";
 import { DEFAULT_FOLLOWUP_PROMPT, DEFAULT_LINK_PROMPT, DEFAULT_REOPEN_BUTTON_LABEL, DEFAULT_REOPEN_MESSAGE, DEFAULT_REOPEN_PROMPT, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_MESSAGE, DEFAULT_RESOLVED_EMOJI, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
 import { ADMIN_COOKIE, parseCookies, Signer, type AdminSession } from "../session.js";
@@ -82,7 +96,15 @@ const wrap = (fn: Handler) => (req: Request, res: Response, next: NextFunction) 
 const badRequest = (res: Response, error: string) => void res.status(400).json({ error });
 const zodMsg = (e: z.ZodError) => e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
 
-export function requireAdmin(signer: Signer) {
+export type AuthedRequest = Request & { admin: AdminSession; actor: Actor };
+const actorOf = (req: Request): Actor => (req as AuthedRequest).actor;
+
+/**
+ * Verify the session cookie, then resolve the person's current roles from the database.
+ * Roles are read per request rather than baked into the cookie so that removing someone
+ * takes effect at once instead of whenever their 12-hour session happens to expire.
+ */
+export function requireAdmin(signer: Signer, db: Db) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const session = signer.verify<AdminSession>(parseCookies(req.headers.cookie)[ADMIN_COOKIE]);
     if (!session) {
@@ -94,14 +116,32 @@ export function requireAdmin(signer: Signer) {
       res.status(403).json({ error: "missing X-Requested-With header" });
       return;
     }
-    (req as Request & { admin: AdminSession }).admin = session;
-    next();
+    (req as AuthedRequest).admin = session;
+    loadActor(db, session.userId)
+      .then((actor) => {
+        if (!actor) {
+          // Access was revoked while they held a valid cookie.
+          res.status(403).json({ error: "your access to this control panel has been removed" });
+          return;
+        }
+        (req as AuthedRequest).actor = actor;
+        next();
+      })
+      .catch(next);
   };
 }
 
+/** 403 unless the person passes `allow`; returns whether the request may continue. */
+function guard(req: Request, res: Response, allow: boolean, message = "you do not have access to that"): boolean {
+  if (allow) return true;
+  res.status(403).json({ error: message });
+  return false;
+}
+
 export interface AdminApiOptions {
-  /** Overridable for tests. */
+  /** Both overridable for tests, so verifying a pasted token hits no network. */
   createSlackClient?: (token: string) => WebClient;
+  createChatwootClient?: (apiToken: string) => ChatwootClient;
 }
 
 export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApiOptions = {}): void {
@@ -109,15 +149,18 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   const signer = new Signer(config.TOKEN_ENCRYPTION_KEY);
   const api = express.Router();
   api.use(express.json({ limit: "256kb" }));
-  api.use(requireAdmin(signer));
+  api.use(requireAdmin(signer, db));
 
   const slackClient = opts.createSlackClient ?? ((t: string) => new WebClient(t));
-  const introspectClient = (apiToken: string) => new ChatwootClient({ baseUrl: config.CHATWOOT_BASE_URL, accountId: 0, inboxIdentifier: "", apiToken });
+  const introspectClient =
+    opts.createChatwootClient ?? ((apiToken: string) => new ChatwootClient({ baseUrl: config.CHATWOOT_BASE_URL, accountId: 0, inboxIdentifier: "", apiToken }));
   const enc = (v: string) => encryptToken(v, config.TOKEN_ENCRYPTION_KEY);
 
   api.get("/me", (req, res) => {
+    const actor = actorOf(req);
     res.json({
-      user: (req as Request & { admin: AdminSession }).admin,
+      user: { userId: actor.slackUserId, name: actor.name, role: actor.role },
+      can: { createBridge: canCreateBridge(actor), managePeople: isSuper(actor), seeOps: isSuper(actor) },
       chatwootBaseUrl: config.CHATWOOT_BASE_URL,
       publicUrl: config.PUBLIC_URL,
       defaults: {
@@ -136,37 +179,97 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
 
   api.get(
     "/status",
-    wrap(async (_req, res) => {
-      const [t, r, a, q] = await Promise.all([
-        db.select({ n: sql<number>`count(*)::int` }).from(threads),
-        db.select({ n: sql<number>`count(*)::int` }).from(relayed),
-        db.select({ n: sql<number>`count(*)::int` }).from(agents),
-        db.select({ n: sql<number>`count(*)::int` }).from(retries),
+    wrap(async (req, res) => {
+      const actor = actorOf(req);
+      const scope = await scopeOf(actor);
+      const count = async (q: Promise<{ n: number }[]>) => (await q)[0]?.n ?? 0;
+      const [threadCount, relayedCount, agentCount, retryCount] = await Promise.all([
+        count(db.select({ n: sql<number>`count(*)::int` }).from(threads).where(scope.channelFilter(threads.slackChannel))),
+        count(db.select({ n: sql<number>`count(*)::int` }).from(relayed).where(scope.channelFilter(relayed.slackChannel))),
+        scope.all ? count(db.select({ n: sql<number>`count(*)::int` }).from(agents)) : (await visibleAgents(actor)).length,
+        scope.all ? count(db.select({ n: sql<number>`count(*)::int` }).from(retries)) : (await visibleRetries(actor)).length,
       ]);
       res.json({
-        webhookUrl: `${config.PUBLIC_URL}/webhooks/chatwoot/${config.CHATWOOT_WEBHOOK_SECRET}`,
+        // The webhook URL embeds the install-wide Chatwoot secret, so only superadmins see it.
+        ...(isSuper(actor) ? { webhookUrl: `${config.PUBLIC_URL}/webhooks/chatwoot/${config.CHATWOOT_WEBHOOK_SECRET}` } : {}),
         linkUrl: `${config.PUBLIC_URL}/link`,
-        counts: { threads: t[0]?.n ?? 0, relayed: r[0]?.n ?? 0, agents: a[0]?.n ?? 0, retries: q[0]?.n ?? 0 },
+        counts: { threads: threadCount, relayed: relayedCount, agents: agentCount, retries: retryCount },
       });
     }),
   );
 
+  // ---- scoping ----
+
+  /**
+   * What this person can see, expressed as filters. A superadmin gets `all`, and every filter
+   * is a no-op; anyone else is confined to the bridges they hold a membership on. Someone with
+   * no bridges gets `sql\`false\``, i.e. empty lists rather than everything.
+   */
+  async function scopeOf(actor: Actor) {
+    const ids = visibleBridgeIds(actor);
+    if (ids === null) return { all: true as const, bridgeIds: null, rows: [], channels: [], accounts: [], channelFilter: () => undefined as SQL | undefined };
+    const rows = ids.length ? await db.select().from(bridges).where(inArray(bridges.id, ids)) : [];
+    const channels = rows.map((b) => b.slackChannel);
+    const accounts = [...new Set(rows.map((b) => b.chatwootAccountId))];
+    return {
+      all: false as const,
+      bridgeIds: ids,
+      rows,
+      channels,
+      accounts,
+      channelFilter: (col: PgColumn): SQL | undefined => (channels.length ? inArray(col, channels) : sql`false`),
+    };
+  }
+
+  /** Load a bridge and check the viewer may act on it; replies 404/403 itself and returns undefined. */
+  async function bridgeFor(req: Request, res: Response, need: "configure" | "administer") {
+    const actor = actorOf(req);
+    const id = Number(req.params.id);
+    const row = (await db.select().from(bridges).where(eq(bridges.id, id)))[0];
+    // 404 rather than 403 for a bridge they cannot see: no reason to confirm it exists.
+    if (!row || !canConfigureBridge(actor, id)) {
+      res.status(404).json({ error: "not found" });
+      return undefined;
+    }
+    if (need === "administer" && !canAdministerBridge(actor, id)) {
+      res.status(403).json({ error: "only an admin of this bridge can do that" });
+      return undefined;
+    }
+    return row;
+  }
+
   // ---- bridges ----
 
-  const redact = (b: typeof bridges.$inferSelect) => {
+  const redact = (b: typeof bridges.$inferSelect, actor?: Actor) => {
     const { chatwootApiTokenEnc: _c, slackBotTokenEnc: _b, slackSigningSecretEnc: _s, ...rest } = b;
-    return { ...rest, hasChatwootToken: Boolean(b.chatwootApiTokenEnc), hasSlackApp: Boolean(b.slackBotTokenEnc), eventsUrl: `${config.PUBLIC_URL}/slack/events/${b.slug}` };
+    return {
+      ...rest,
+      hasChatwootToken: Boolean(b.chatwootApiTokenEnc),
+      hasSlackApp: Boolean(b.slackBotTokenEnc),
+      eventsUrl: `${config.PUBLIC_URL}/slack/events/${b.slug}`,
+      ...(actor ? { yourRole: bridgeRole(actor, b.id) ?? null } : {}),
+    };
   };
 
   api.get(
     "/bridges",
-    wrap(async (_req, res) => {
-      res.json((await db.select().from(bridges).orderBy(bridges.name)).map(redact));
+    wrap(async (req, res) => {
+      const actor = actorOf(req);
+      const ids = visibleBridgeIds(actor);
+      if (ids !== null && ids.length === 0) return void res.json([]);
+      const rows = await db
+        .select()
+        .from(bridges)
+        .where(ids === null ? undefined : inArray(bridges.id, ids))
+        .orderBy(bridges.name);
+      res.json(rows.map((b) => redact(b, actor)));
     }),
   );
 
   /** Manifest for a bridge's Slack app, before or after the bridge exists. */
   api.get("/manifest", (req, res) => {
+    const actor = actorOf(req);
+    if (!guard(req, res, canCreateBridge(actor) || actor.bridges.size > 0)) return;
     const name = String(req.query.name ?? "").trim() || "Support Bridge";
     const slug = String(req.query.slug ?? "").trim() || slugify(name);
     if (!SLUG_RE.test(slug)) return badRequest(res, "invalid slug");
@@ -178,12 +281,14 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   api.post(
     "/bridges",
     wrap(async (req, res) => {
+      const actor = actorOf(req);
+      if (!guard(req, res, canCreateBridge(actor), "only an admin can create a bridge; ask a superadmin to promote you")) return;
       const input = bridgeInput.safeParse(req.body);
       if (!input.success) return badRequest(res, zodMsg(input.error));
       const d = input.data;
       if (!d.chatwootApiToken) return badRequest(res, "chatwootApiToken is required");
       if (!d.slackBotToken || !d.slackSigningSecret) return badRequest(res, "slackBotToken and slackSigningSecret are required");
-      const cw = await verifyServiceToken(introspectClient(d.chatwootApiToken), d.chatwootAccountId, d.chatwootInboxIdentifier);
+      const cw = await verifyServiceToken(introspectClient(d.chatwootApiToken), d.chatwootAccountId, d.chatwootInboxIdentifier, d.chatwootApiToken);
       if (typeof cw === "string") return badRequest(res, cw);
       const bot = await verifyBotToken(slackClient(d.slackBotToken), d.slackChannel);
       if ("error" in bot) return badRequest(res, bot.error);
@@ -217,9 +322,12 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           enabled: d.enabled ?? true,
         })
         .returning();
+      // Whoever creates a bridge owns it, so a program author never needs a superadmin again.
+      await db.insert(bridgeMembers).values({ bridgeId: row!.id, slackUserId: actor.slackUserId, role: "admin" }).onConflictDoNothing();
+      actor.bridges.set(row!.id, "admin");
       await ctx.bridges.reload();
-      log.info("bridge created", { bridge: row!.name, by: (req as Request & { admin: AdminSession }).admin.userId });
-      res.status(201).json({ ...redact(row!), warning: bot.warning });
+      log.info("bridge created", { bridge: row!.name, by: actor.slackUserId });
+      res.status(201).json({ ...redact(row!, actor), warning: bot.warning });
     }),
   );
 
@@ -229,15 +337,15 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
       const id = Number(req.params.id);
       const input = bridgeInput.partial().safeParse(req.body);
       if (!input.success) return badRequest(res, zodMsg(input.error));
-      const existing = (await db.select().from(bridges).where(eq(bridges.id, id)))[0];
-      if (!existing) return void res.status(404).json({ error: "not found" });
+      const existing = await bridgeFor(req, res, "configure");
+      if (!existing) return;
       const d = input.data;
       const accountId = d.chatwootAccountId ?? existing.chatwootAccountId;
       const inbox = d.chatwootInboxIdentifier ?? existing.chatwootInboxIdentifier;
       const channel = d.slackChannel ?? existing.slackChannel;
       let inboxId: number | undefined;
       if (d.chatwootApiToken) {
-        const cw = await verifyServiceToken(introspectClient(d.chatwootApiToken), accountId, inbox);
+        const cw = await verifyServiceToken(introspectClient(d.chatwootApiToken), accountId, inbox, d.chatwootApiToken);
         if (typeof cw === "string") return badRequest(res, cw);
         inboxId = cw.inboxId;
       }
@@ -279,7 +387,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
         .where(eq(bridges.id, id))
         .returning();
       await ctx.bridges.reload();
-      res.json({ ...redact(row!), warning });
+      res.json({ ...redact(row!, actorOf(req)), warning });
     }),
   );
 
@@ -292,8 +400,8 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
     "/bridges/:id/check",
     wrap(async (req, res) => {
       const id = Number(req.params.id);
-      const row = (await db.select().from(bridges).where(eq(bridges.id, id)))[0];
-      if (!row) return void res.status(404).json({ error: "not found" });
+      const row = await bridgeFor(req, res, "configure");
+      if (!row) return;
       const bridge = ctx.bridges.get(id);
       const out: Record<string, unknown> = {
         name: row.name,
@@ -356,8 +464,84 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   api.delete(
     "/bridges/:id",
     wrap(async (req, res) => {
-      await db.delete(bridges).where(eq(bridges.id, Number(req.params.id)));
+      const row = await bridgeFor(req, res, "administer");
+      if (!row) return;
+      await db.delete(bridges).where(eq(bridges.id, row.id));
       await ctx.bridges.reload();
+      log.info("bridge deleted", { bridge: row.name, by: actorOf(req).slackUserId });
+      res.status(204).end();
+    }),
+  );
+
+  // ---- who may touch a bridge ----
+
+  const SLACK_USER_RE = /^[UW][A-Z0-9]+$/;
+
+  /** Everyone on this bridge, plus the superadmins who reach it implicitly. */
+  api.get(
+    "/bridges/:id/members",
+    wrap(async (req, res) => {
+      const row = await bridgeFor(req, res, "configure");
+      if (!row) return;
+      const members = await db.select().from(bridgeMembers).where(eq(bridgeMembers.bridgeId, row.id)).orderBy(bridgeMembers.createdAt);
+      const supers = await db.select().from(adminUsers).where(eq(adminUsers.role, "superadmin"));
+      const names = await rosterNames(
+        db,
+        members.map((m) => m.slackUserId),
+      );
+      res.json({
+        canInvite: canAdministerBridge(actorOf(req), row.id),
+        members: members.map((m) => ({ slackUserId: m.slackUserId, name: names.get(m.slackUserId) ?? null, role: m.role, invitedBy: m.invitedBy, createdAt: m.createdAt })),
+        superadmins: supers.map((u) => ({ slackUserId: u.slackUserId, name: u.name })),
+      });
+    }),
+  );
+
+  /**
+   * Invite someone to one bridge. Creates their panel account as an `operator` if they have
+   * none: a community member who can run this bridge and nothing else. An existing global
+   * role is never lowered by an invite.
+   */
+  api.post(
+    "/bridges/:id/members",
+    wrap(async (req, res) => {
+      const row = await bridgeFor(req, res, "administer");
+      if (!row) return;
+      const actor = actorOf(req);
+      const input = z
+        .object({ slackUserId: z.string().trim().regex(SLACK_USER_RE, "Slack user ID like U0123456789"), role: z.enum(["admin", "operator"]).default("operator") })
+        .safeParse(req.body);
+      if (!input.success) return badRequest(res, zodMsg(input.error));
+      const { slackUserId, role } = input.data;
+      await db
+        .insert(adminUsers)
+        .values({ slackUserId, role: "operator", invitedBy: actor.slackUserId })
+        .onConflictDoNothing();
+      const [member] = await db
+        .insert(bridgeMembers)
+        .values({ bridgeId: row.id, slackUserId, role, invitedBy: actor.slackUserId })
+        .onConflictDoUpdate({ target: [bridgeMembers.bridgeId, bridgeMembers.slackUserId], set: { role } })
+        .returning();
+      log.info("bridge member added", { bridge: row.name, slackUserId, role, by: actor.slackUserId });
+      res.status(201).json({ slackUserId, role: member!.role, invitedBy: member!.invitedBy, createdAt: member!.createdAt });
+    }),
+  );
+
+  api.delete(
+    "/bridges/:id/members/:slackUserId",
+    wrap(async (req, res) => {
+      const row = await bridgeFor(req, res, "administer");
+      if (!row) return;
+      const slackUserId = String(req.params.slackUserId);
+      const members = await db.select().from(bridgeMembers).where(eq(bridgeMembers.bridgeId, row.id));
+      const target = members.find((m) => m.slackUserId === slackUserId);
+      if (!target) return void res.status(404).json({ error: "not a member of this bridge" });
+      // Never strip a bridge of its last admin: a superadmin would have to hand it back.
+      if (target.role === "admin" && members.filter((m) => m.role === "admin").length === 1) {
+        return badRequest(res, "this is the bridge's only admin; add another admin first");
+      }
+      await db.delete(bridgeMembers).where(and(eq(bridgeMembers.bridgeId, row.id), eq(bridgeMembers.slackUserId, slackUserId)));
+      log.info("bridge member removed", { bridge: row.name, slackUserId, by: actorOf(req).slackUserId });
       res.status(204).end();
     }),
   );
@@ -398,6 +582,9 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
         .object({ botToken: z.string().trim().min(1).optional(), bridgeId: z.number().int().optional(), channel: z.string().trim().optional() })
         .safeParse(req.body);
       if (!input.success || (!input.data.botToken && !input.data.bridgeId)) return badRequest(res, "botToken or bridgeId required");
+      if (input.data.bridgeId !== undefined && !canConfigureBridge(actorOf(req), input.data.bridgeId)) {
+        return void res.status(404).json({ error: "not found" });
+      }
       const client = input.data.botToken ? slackClient(input.data.botToken) : ctx.bridges.get(input.data.bridgeId!)?.slack;
       if (!client) return badRequest(res, "bridge not loaded");
       let auth;
@@ -419,6 +606,99 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
     }),
   );
 
+  // ---- the roster: who may sign in at all (superadmins only) ----
+
+  /**
+   * Global roles. `superadmin` runs the install, `admin` may create bridges of their own, and
+   * `operator` may only do what a bridge admin has invited them to do. Bridge-level grants are
+   * managed by each bridge's admins under /bridges/:id/members and are untouched here.
+   */
+  api.get(
+    "/people",
+    wrap(async (req, res) => {
+      if (!guard(req, res, isSuper(actorOf(req)), "only a superadmin can see the roster")) return;
+      const rows = await db.select().from(adminUsers).orderBy(adminUsers.createdAt);
+      const members = await db.select().from(bridgeMembers);
+      const bridgeNames = new Map((await db.select().from(bridges)).map((b) => [b.id, b.name]));
+      res.json(
+        rows.map((u) => ({
+          slackUserId: u.slackUserId,
+          name: u.name,
+          role: u.role,
+          invitedBy: u.invitedBy,
+          lastSeenAt: u.lastSeenAt,
+          createdAt: u.createdAt,
+          bridges: members
+            .filter((m) => m.slackUserId === u.slackUserId)
+            .map((m) => ({ id: m.bridgeId, name: bridgeNames.get(m.bridgeId) ?? null, role: m.role })),
+        })),
+      );
+    }),
+  );
+
+  const roleInput = z.object({ role: z.enum(["superadmin", "admin", "operator"]) });
+
+  api.post(
+    "/people",
+    wrap(async (req, res) => {
+      const actor = actorOf(req);
+      if (!guard(req, res, isSuper(actor), "only a superadmin can add people")) return;
+      const input = roleInput
+        .extend({ slackUserId: z.string().trim().regex(SLACK_USER_RE, "Slack user ID like U0123456789") })
+        .safeParse(req.body);
+      if (!input.success) return badRequest(res, zodMsg(input.error));
+      const [row] = await db
+        .insert(adminUsers)
+        .values({ slackUserId: input.data.slackUserId, role: input.data.role, invitedBy: actor.slackUserId })
+        .onConflictDoUpdate({ target: adminUsers.slackUserId, set: { role: input.data.role } })
+        .returning();
+      log.info("roster entry added", { slackUserId: input.data.slackUserId, role: input.data.role, by: actor.slackUserId });
+      res.status(201).json({ slackUserId: row!.slackUserId, name: row!.name, role: row!.role });
+    }),
+  );
+
+  api.put(
+    "/people/:slackUserId",
+    wrap(async (req, res) => {
+      const actor = actorOf(req);
+      if (!guard(req, res, isSuper(actor), "only a superadmin can change roles")) return;
+      const input = roleInput.safeParse(req.body);
+      if (!input.success) return badRequest(res, zodMsg(input.error));
+      const slackUserId = String(req.params.slackUserId);
+      const blocked = await lastSuperadminGuard(slackUserId, input.data.role);
+      if (blocked) return badRequest(res, blocked);
+      const [row] = await db.update(adminUsers).set({ role: input.data.role }).where(eq(adminUsers.slackUserId, slackUserId)).returning();
+      if (!row) return void res.status(404).json({ error: "not on the roster" });
+      log.info("roster role changed", { slackUserId, role: input.data.role, by: actor.slackUserId });
+      res.json({ slackUserId: row.slackUserId, name: row.name, role: row.role });
+    }),
+  );
+
+  api.delete(
+    "/people/:slackUserId",
+    wrap(async (req, res) => {
+      const actor = actorOf(req);
+      if (!guard(req, res, isSuper(actor), "only a superadmin can remove people")) return;
+      const slackUserId = String(req.params.slackUserId);
+      const blocked = await lastSuperadminGuard(slackUserId, "operator");
+      if (blocked) return badRequest(res, blocked);
+      // Removing someone takes their bridge grants with them; their agent link is left alone,
+      // since that governs ticket attribution rather than panel access.
+      await db.delete(bridgeMembers).where(eq(bridgeMembers.slackUserId, slackUserId));
+      await db.delete(adminUsers).where(eq(adminUsers.slackUserId, slackUserId));
+      log.info("roster entry removed", { slackUserId, by: actor.slackUserId });
+      res.status(204).end();
+    }),
+  );
+
+  /** Refuse anything that would leave the install with no superadmin. Returns a reason or undefined. */
+  async function lastSuperadminGuard(slackUserId: string, nextRole: string): Promise<string | undefined> {
+    if (nextRole === "superadmin") return undefined;
+    const supers = await db.select().from(adminUsers).where(eq(adminUsers.role, "superadmin"));
+    if (supers.length === 1 && supers[0]!.slackUserId === slackUserId) return "this is the last superadmin; promote someone else first";
+    return undefined;
+  }
+
   // ---- agents ----
 
   const redactAgent = (a: typeof agents.$inferSelect) => ({
@@ -431,10 +711,40 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
     createdAt: a.createdAt,
   });
 
+  /**
+   * The people this viewer has any business seeing: everyone, for a superadmin, and otherwise
+   * whoever is either a Chatwoot agent in one of their bridges' accounts or a Slack user who
+   * has actually asked something in one of their channels.
+   */
+  async function visibleAgents(actor: Actor): Promise<(typeof agents.$inferSelect)[]> {
+    const all = await db.select().from(agents).orderBy(desc(agents.createdAt));
+    if (isSuper(actor)) return all;
+    const scope = await scopeOf(actor);
+    if (scope.all) return all;
+    const chatwootIds = new Set((await listChatwootAgents(ctx, scope.bridgeIds ?? [])).map((a) => a.id));
+    const askers = new Set(
+      scope.channels.length
+        ? (await db.selectDistinct({ user: threads.slackAuthorId }).from(threads).where(inArray(threads.slackChannel, scope.channels))).map((r) => r.user)
+        : [],
+    );
+    return all.filter((a) => (a.chatwootAgentId !== null && chatwootIds.has(a.chatwootAgentId)) || askers.has(a.slackUserId));
+  }
+
+  /** Load an agent row the viewer may act on, or reply 404. */
+  async function agentFor(req: Request, res: Response) {
+    const id = Number(req.params.id);
+    const row = (await visibleAgents(actorOf(req))).find((a) => a.id === id);
+    if (!row) {
+      res.status(404).json({ error: "not found" });
+      return undefined;
+    }
+    return row;
+  }
+
   api.get(
     "/agents",
-    wrap(async (_req, res) => {
-      res.json((await db.select().from(agents).orderBy(desc(agents.createdAt))).map(redactAgent));
+    wrap(async (req, res) => {
+      res.json((await visibleAgents(actorOf(req))).map(redactAgent));
     }),
   );
 
@@ -453,8 +763,9 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   /** Chatwoot agents across every bridged account, for manual linking. */
   api.get(
     "/chatwoot/agents",
-    wrap(async (_req, res) => {
-      res.json(await listChatwootAgents(ctx));
+    wrap(async (req, res) => {
+      const scope = await scopeOf(actorOf(req));
+      res.json(await listChatwootAgents(ctx, scope.bridgeIds));
     }),
   );
 
@@ -465,7 +776,10 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   api.put(
     "/agents/:id/chatwoot-agent",
     wrap(async (req, res) => {
-      const id = Number(req.params.id);
+      const target = await agentFor(req, res);
+      if (!target) return;
+      const id = target.id;
+      const scope = await scopeOf(actorOf(req));
       const input = z
         .object({ chatwootAgentId: z.number().int().positive().nullable().optional(), email: z.string().trim().email().optional() })
         .safeParse(req.body);
@@ -473,13 +787,13 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
       let agentId = input.data.chatwootAgentId;
       let email: string | null | undefined;
       if (input.data.email) {
-        const all = await listChatwootAgents(ctx);
+        const all = await listChatwootAgents(ctx, scope.bridgeIds);
         const hit = all.find((a) => a.email?.toLowerCase() === input.data.email!.toLowerCase());
         if (!hit) return badRequest(res, `No Chatwoot agent with email ${input.data.email} in any bridged account`);
         agentId = hit.id;
         email = hit.email;
       } else if (agentId) {
-        const all = await listChatwootAgents(ctx);
+        const all = await listChatwootAgents(ctx, scope.bridgeIds);
         const hit = all.find((a) => a.id === agentId);
         if (!hit) return badRequest(res, `Chatwoot agent ${agentId} is not in any bridged account`);
         email = hit.email;
@@ -492,7 +806,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
         .where(eq(agents.id, id))
         .returning();
       if (!row) return void res.status(404).json({ error: "not found" });
-      log.info("agent link set manually", { agentRow: id, chatwootAgentId: agentId, by: (req as Request & { admin: AdminSession }).admin.userId });
+      log.info("agent link set manually", { agentRow: id, chatwootAgentId: agentId, by: actorOf(req).slackUserId });
       res.json(redactAgent(row));
     }),
   );
@@ -500,7 +814,9 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   api.put(
     "/agents/:id/chatwoot-token",
     wrap(async (req, res) => {
-      const id = Number(req.params.id);
+      const target = await agentFor(req, res);
+      if (!target) return;
+      const id = target.id;
       const input = z.object({ apiToken: z.string().trim().min(1) }).safeParse(req.body);
       if (!input.success) return badRequest(res, "apiToken required");
       let profile;
@@ -523,7 +839,9 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   api.delete(
     "/agents/:id/chatwoot-token",
     wrap(async (req, res) => {
-      await db.update(agents).set({ chatwootApiTokenEnc: null }).where(eq(agents.id, Number(req.params.id)));
+      const target = await agentFor(req, res);
+      if (!target) return;
+      await db.update(agents).set({ chatwootApiTokenEnc: null }).where(eq(agents.id, target.id));
       res.status(204).end();
     }),
   );
@@ -531,7 +849,9 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   api.delete(
     "/agents/:id",
     wrap(async (req, res) => {
-      await db.delete(agents).where(eq(agents.id, Number(req.params.id)));
+      const target = await agentFor(req, res);
+      if (!target) return;
+      await db.delete(agents).where(eq(agents.id, target.id));
       res.status(204).end();
     }),
   );
@@ -542,22 +862,63 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
     "/threads",
     wrap(async (req, res) => {
       const limit = Math.min(Number(req.query.limit ?? 50) || 50, 200);
-      const rows = await db.select().from(threads).orderBy(desc(threads.createdAt)).limit(limit);
+      const scope = await scopeOf(actorOf(req));
+      const rows = await db
+        .select()
+        .from(threads)
+        .where(scope.channelFilter(threads.slackChannel))
+        .orderBy(desc(threads.createdAt))
+        .limit(limit);
       res.json(rows.map((t) => ({ ...t, bridge: ctx.bridges.forChannel(t.slackChannel)?.row.name ?? null })));
     }),
   );
 
+  /**
+   * Queued jobs the viewer may see. Slack jobs name a channel and Chatwoot jobs name an
+   * account or inbox, which is enough to attribute nearly all of them to a bridge; anything
+   * that cannot be attributed stays with the superadmins.
+   */
+  async function visibleRetries(actor: Actor): Promise<(typeof retries.$inferSelect)[]> {
+    const rows = await db.select().from(retries).orderBy(retries.nextAttemptAt);
+    if (isSuper(actor)) return rows;
+    const scope = await scopeOf(actor);
+    if (scope.all) return rows;
+    const channels = new Set(scope.channels);
+    const accounts = new Set(scope.accounts);
+    const inboxes = new Set(scope.rows.map((b) => b.chatwootInboxId).filter((i): i is number => i !== null));
+    return rows.filter((r) => {
+      const p = r.payload as { channel?: unknown; accountId?: unknown; inboxId?: unknown };
+      if (typeof p.channel === "string") return channels.has(p.channel);
+      if (typeof p.accountId === "number" && accounts.has(p.accountId)) return true;
+      if (typeof p.inboxId === "number" && inboxes.has(p.inboxId)) return true;
+      return false;
+    });
+  }
+
   api.get(
     "/retries",
-    wrap(async (_req, res) => {
-      res.json(await db.select().from(retries).orderBy(retries.nextAttemptAt));
+    wrap(async (req, res) => {
+      res.json(await visibleRetries(actorOf(req)));
     }),
   );
+
+  /** A retry the viewer may act on, or 404. */
+  async function retryFor(req: Request, res: Response) {
+    const id = Number(req.params.id);
+    const row = (await visibleRetries(actorOf(req))).find((r) => r.id === id);
+    if (!row) {
+      res.status(404).json({ error: "not found" });
+      return undefined;
+    }
+    return row;
+  }
 
   api.post(
     "/retries/:id/run",
     wrap(async (req, res) => {
-      await db.update(retries).set({ nextAttemptAt: new Date() }).where(eq(retries.id, Number(req.params.id)));
+      const row = await retryFor(req, res);
+      if (!row) return;
+      await db.update(retries).set({ nextAttemptAt: new Date() }).where(eq(retries.id, row.id));
       await ctx.retry.drain();
       res.status(204).end();
     }),
@@ -566,7 +927,9 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
   api.delete(
     "/retries/:id",
     wrap(async (req, res) => {
-      await db.delete(retries).where(eq(retries.id, Number(req.params.id)));
+      const row = await retryFor(req, res);
+      if (!row) return;
+      await db.delete(retries).where(eq(retries.id, row.id));
       res.status(204).end();
     }),
   );
@@ -586,11 +949,13 @@ export interface ChatwootAgentSummary {
   accounts: number[];
 }
 
-/** Union of agents across all enabled bridges' accounts (Chatwoot user ids are global per install). */
-export async function listChatwootAgents(ctx: AppContext): Promise<ChatwootAgentSummary[]> {
+/** Union of agents across the given bridges' accounts (all of them when `bridgeIds` is null). */
+export async function listChatwootAgents(ctx: AppContext, bridgeIds: number[] | null = null): Promise<ChatwootAgentSummary[]> {
   const byId = new Map<number, ChatwootAgentSummary>();
   const seenAccounts = new Set<number>();
+  const allowed = bridgeIds === null ? null : new Set(bridgeIds);
   for (const bridge of ctx.bridges.all()) {
+    if (allowed && !allowed.has(bridge.row.id)) continue;
     const acct = bridge.row.chatwootAccountId;
     if (seenAccounts.has(acct)) continue;
     seenAccounts.add(acct);
@@ -611,8 +976,7 @@ export async function listChatwootAgents(ctx: AppContext): Promise<ChatwootAgent
 }
 
 /** Does this token belong to a member of `accountId`, and does that account have an API inbox with this identifier? Returns an error string or the inbox id. */
-async function verifyServiceToken(client: ChatwootClient, accountId: number, inboxIdentifier: string): Promise<string | { inboxId: number }> {
-  const token = client["opts"].apiToken;
+async function verifyServiceToken(client: ChatwootClient, accountId: number, inboxIdentifier: string, token: string): Promise<string | { inboxId: number }> {
   try {
     const profile = await client.whoAmI(token);
     if (profile.accounts && !profile.accounts.some((a) => a.id === accountId)) return `That token's user is not a member of Chatwoot account ${accountId}`;

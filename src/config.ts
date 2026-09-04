@@ -59,13 +59,16 @@ const envSchema = z.object({
       .default("https://auth.hackclub.com"),
   ),
 
-  /** Comma-separated Slack user IDs allowed into the control panel. */
+  /**
+   * Comma-separated Slack user IDs to make superadmins on a fresh install. Only read while the
+   * roster has no superadmin yet: after that, panel roles win and this can be dropped.
+   */
   ADMIN_SLACK_USER_IDS: z
     .string()
     .trim()
-    .min(1, "ADMIN_SLACK_USER_IDS is required (comma-separated Slack user IDs)")
+    .default("")
     .transform((s) => s.split(",").map((x) => x.trim()).filter(Boolean))
-    .refine((ids) => ids.length > 0 && ids.every((id) => /^[UW][A-Z0-9]+$/.test(id)), "ADMIN_SLACK_USER_IDS must be Slack user IDs like U0123456789"),
+    .refine((ids) => ids.every((id) => /^[UW][A-Z0-9]+$/.test(id)), "ADMIN_SLACK_USER_IDS must be Slack user IDs like U0123456789"),
 
   DATABASE_URL: nonEmpty("DATABASE_URL"),
   TOKEN_ENCRYPTION_KEY: keySchema,

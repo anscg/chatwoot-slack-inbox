@@ -28,14 +28,19 @@ export const api = {
   del: <T>(path: string) => call<T>("DELETE", path),
 };
 
+export type GlobalRole = "superadmin" | "admin" | "operator";
+export type BridgeRole = "admin" | "operator";
+
 export interface Me {
-  user: { userId: string; name: string };
+  user: { userId: string; name: string; role: GlobalRole };
+  can: { createBridge: boolean; managePeople: boolean; seeOps: boolean };
   chatwootBaseUrl: string;
   publicUrl: string;
   defaults: { welcomeMessage: string; resolvedEmoji: string; resolveButtonLabel: string; reopenButtonLabel: string; resolveMessage: string; reopenMessage: string; reopenPromptMessage: string; followupPromptMessage: string; linkPromptMessage: string };
 }
 export interface Status {
-  webhookUrl: string;
+  /** Superadmins only: it embeds the install-wide Chatwoot webhook secret. */
+  webhookUrl?: string;
   linkUrl: string;
   counts: { threads: number; relayed: number; agents: number; retries: number };
 }
@@ -68,6 +73,30 @@ export interface Bridge {
   createdAt: string;
   updatedAt: string;
   warning?: string;
+  /** The signed-in person's role on this bridge; superadmins read as "admin". */
+  yourRole: BridgeRole | null;
+}
+
+export interface BridgeMember {
+  slackUserId: string;
+  name: string | null;
+  role: BridgeRole;
+  invitedBy: string | null;
+  createdAt: string;
+}
+export interface BridgeMembers {
+  canInvite: boolean;
+  members: BridgeMember[];
+  superadmins: { slackUserId: string; name: string | null }[];
+}
+export interface Person {
+  slackUserId: string;
+  name: string | null;
+  role: GlobalRole;
+  invitedBy: string | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  bridges: { id: number; name: string | null; role: BridgeRole }[];
 }
 export interface Agent {
   id: number;

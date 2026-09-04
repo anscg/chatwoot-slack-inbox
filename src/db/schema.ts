@@ -54,6 +54,48 @@ export const bridges = pgTable(
   (t) => [uniqueIndex("bridges_channel_uq").on(t.slackChannel), uniqueIndex("bridges_name_uq").on(t.name), uniqueIndex("bridges_slug_uq").on(t.slug)],
 );
 
+/**
+ * Everyone who may sign in to the control panel. The global role says only how far a person
+ * reaches on their own: superadmins see the whole install, admins may stand up new bridges,
+ * operators reach nothing until an admin adds them to a bridge. Per-bridge rights live in
+ * `bridgeMembers`. Seeded from ADMIN_SLACK_USER_IDS at boot, then managed in the panel.
+ */
+export const adminUsers = pgTable(
+  "admin_users",
+  {
+    id: serial("id").primaryKey(),
+    slackUserId: text("slack_user_id").notNull(),
+    /** Cached from the Slack profile at sign-in, so the roster reads as names not IDs. */
+    name: text("name"),
+    role: text("role", { enum: ["superadmin", "admin", "operator"] }).notNull().default("operator"),
+    /** Slack user ID of whoever added them; null for the env-seeded superadmins. */
+    invitedBy: text("invited_by"),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("admin_users_slack_user_uq").on(t.slackUserId)],
+);
+
+/**
+ * Which bridges a person may touch, and how. `admin` owns the bridge: configure it, invite
+ * operators, delete it. `operator` configures everything on it but cannot invite or delete.
+ * Superadmins are implicitly an admin of every bridge and need no rows here.
+ */
+export const bridgeMembers = pgTable(
+  "bridge_members",
+  {
+    id: serial("id").primaryKey(),
+    bridgeId: integer("bridge_id")
+      .notNull()
+      .references(() => bridges.id, { onDelete: "cascade" }),
+    slackUserId: text("slack_user_id").notNull(),
+    role: text("role", { enum: ["admin", "operator"] }).notNull().default("operator"),
+    invitedBy: text("invited_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("bridge_members_uq").on(t.bridgeId, t.slackUserId), index("bridge_members_user_idx").on(t.slackUserId)],
+);
+
 /** One row per bridged Slack thread <-> Chatwoot conversation. */
 export const threads = pgTable(
   "threads",
@@ -180,6 +222,8 @@ export const retries = pgTable(
 );
 
 export type BridgeRow = typeof bridges.$inferSelect;
+export type AdminUser = typeof adminUsers.$inferSelect;
+export type BridgeMember = typeof bridgeMembers.$inferSelect;
 export type Thread = typeof threads.$inferSelect;
 export type Agent = typeof agents.$inferSelect;
 export type Retry = typeof retries.$inferSelect;

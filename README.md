@@ -54,6 +54,23 @@ Option B — **Compose**: choose *Compose*, point it at [`docker-compose.dokploy
 
 Redeploys are safe: migrations are idempotent, bridges/agents live in Postgres, and Slack retries any events missed during the restart.
 
+## Who can change what
+
+The panel has three roles, so a distributed team can run its own programs without everyone being able to reconfigure everyone else's.
+
+| | Superadmin | Admin | Operator |
+|---|---|---|---|
+| Sees | the whole install | the bridges they are on | the bridges they are on |
+| Create a bridge | yes | yes — and owns what they create | no |
+| Configure a bridge they are on | yes | yes | yes, including its tokens |
+| Invite people to it / delete it | yes | yes, on their own bridges | no |
+| Manage the roster (who may sign in) | yes | no | no |
+| Threads, agents, retries | everything | filtered to their bridges | filtered to their bridges |
+
+The flow this is built for: a superadmin makes a program author an **admin**; the author stands up their own bridge and becomes its admin; they invite their support team as **operators** on that bridge alone. Nobody needs a superadmin after the first step, and an operator on one program cannot see or touch another.
+
+`ADMIN_SLACK_USER_IDS` is only a bootstrap. It is read while no superadmin exists yet — on a fresh install, or if the database is ever reset — and ignored after that, so demoting someone in the panel is not undone by the next restart. Everyone else joins by being invited: they sign in at `${PUBLIC_URL}/admin/` with Slack and their roster entry lets them through. The panel refuses to remove the last superadmin or the last admin of a bridge.
+
 ## Agents linking their accounts
 
 Every agent should visit `${PUBLIC_URL}/link` once (admins get linked automatically when they sign in to the panel). It runs a Slack OAuth flow (user scopes `chat:write`, `files:write`) and stores the user token encrypted; replies made in Chatwoot are then posted to Slack **from the agent's own Slack account** via `chat.postMessage`. Their Slack email is matched against the agents of every bridged Chatwoot account to find their Chatwoot user.
@@ -76,7 +93,7 @@ Set `CHATWOOT_PLATFORM_TOKEN` and the bridge fetches each token itself, at `/lin
 
    Re-run it after adding agents to Chatwoot, or the bridge falls back to the service agent for them.
 
-Chatwoot Cloud has no super admin console, so there it stays manual: an admin attaches the agent's access token on the panel's *Agents* page.
+Chatwoot Cloud has no super admin console, so there it stays manual: anyone who runs the bridge attaches the agent's access token on the panel's *Agents* page.
 
 ## How it behaves
 
@@ -155,7 +172,7 @@ npm run typecheck
 npm run db:generate   # after editing src/db/schema.ts
 ```
 
-Layout: `src/bridges.ts` (bridge registry: one Bolt app + `ExpressReceiver` per bridge, mounted at `/slack/events/{slug}`), `src/slack/events.ts` (message + reaction handlers), `src/slack/post.ts` (posting with identity resolution), `src/slack/oauth.ts` (`/link` and admin sign-in via the hub app), `src/slack/manifest.ts` (per-bridge Slack manifest), `src/chatwoot/client.ts` (typed wrapper over the public + application APIs), `src/chatwoot/webhook.ts`, `src/admin/api.ts`, `src/dashboard.ts` + `public/slack-emoji.js` (the Chatwoot dashboard script), `src/retry.ts`, `web/` (control panel).
+Layout: `src/bridges.ts` (bridge registry: one Bolt app + `ExpressReceiver` per bridge, mounted at `/slack/events/{slug}`), `src/slack/events.ts` (message + reaction handlers), `src/slack/post.ts` (posting with identity resolution), `src/slack/oauth.ts` (`/link` and admin sign-in via the hub app), `src/slack/manifest.ts` (per-bridge Slack manifest), `src/chatwoot/client.ts` (typed wrapper over the public + application APIs), `src/chatwoot/webhook.ts`, `src/admin/api.ts` and `src/admin/access.ts` (roles and scoping), `src/dashboard.ts` + `public/slack-emoji.js` (the Chatwoot dashboard script), `src/retry.ts`, `web/` (control panel).
 
 ## License
 

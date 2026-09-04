@@ -1,14 +1,17 @@
 import express from "express";
 import { describe, expect, it } from "vitest";
 import { listChatwootAgents, requireAdmin } from "../src/admin/api.js";
-import { addBridge, makeContext } from "./helpers.js";
+import { adminUsers } from "../src/db/schema.js";
+import { addBridge, createTestDb, makeContext } from "./helpers.js";
 import { ADMIN_COOKIE, Signer } from "../src/session.js";
 import { TEST_KEY } from "./helpers.js";
 
 async function withServer(fn: (base: string) => Promise<void>) {
   const signer = new Signer(TEST_KEY);
+  const db = await createTestDb();
+  await db.insert(adminUsers).values({ slackUserId: "U_ADMIN", name: "Admin", role: "superadmin" });
   const app = express();
-  app.use("/admin/api", requireAdmin(signer));
+  app.use("/admin/api", requireAdmin(signer, db));
   app.get("/admin/api/me", (req, res) => res.json((req as never as { admin: unknown }).admin));
   app.post("/admin/api/thing", (_req, res) => res.status(204).end());
   const server = app.listen(0);
@@ -28,6 +31,9 @@ describe("admin session", () => {
       expect((await fetch(`${base}/admin/api/me`, { headers: { cookie: `${ADMIN_COOKIE}=${forged}` } })).status).toBe(401);
       const otherKey = new Signer(Buffer.alloc(32, 1)).sign({ userId: "U_ADMIN", name: "x" }, 60_000);
       expect((await fetch(`${base}/admin/api/me`, { headers: { cookie: `${ADMIN_COOKIE}=${otherKey}` } })).status).toBe(401);
+      // A validly signed cookie for someone no longer on the roster is refused too.
+      const removed = `${ADMIN_COOKIE}=${new Signer(TEST_KEY).sign({ userId: "U_GONE", name: "Gone" }, 60_000)}`;
+      expect((await fetch(`${base}/admin/api/me`, { headers: { cookie: removed } })).status).toBe(403);
     });
   });
 
