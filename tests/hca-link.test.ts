@@ -119,7 +119,9 @@ describe("linking an account, Hack Club Auth first", () => {
     await withServer(ctx, async (base) => {
       const state = await hcaHalf(base);
       const body = await (await fetch(`${base}/link/callback?code=slack-code&state=${encodeURIComponent(state)}`)).text();
-      expect(body).toContain("connected");
+      // Not a milder success: a reply from somebody in this state is filed as the asker's own.
+      expect(body).toContain("could not set you up");
+      expect(body).toContain("don't answer any tickets yet");
       expect(body).not.toMatch(/token|control panel|Chatwoot/i);
     });
 

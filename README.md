@@ -84,6 +84,8 @@ Set `HCA_CLIENT_ID` and `HCA_CLIENT_SECRET` (and `HCA_ISSUER` if you are not on 
 
 The pages people see at the end of this say whether they are set up and nothing else. They do not mention Chatwoot tokens, the control panel or the service agent: the person reading has no way to act on any of it, and most of them will never have a reason to know it exists. What is left to do shows up on the helper roster instead, where somebody can actually do it.
 
+A link that ends without a match is reported as a **failure**, not a milder kind of success. Somebody in that state who answers a ticket has their reply filed as the *asker's own message* (see the relay rules below), so the page tells them not to answer anything yet and to say so to whoever runs the program.
+
 If an agent replies before linking, the message still reaches Slack (posted by the bridge's bot with the agent's name and avatar) and the agent gets a private note in the conversation pointing them to `/link`.
 
 For the other direction — Slack replies attributed to them in Chatwoot — the bridge needs that agent's own Chatwoot access token. Without one their replies go out under the bridge's service agent (so they wear *its* name and avatar) with their name prefixed into the text.

@@ -34,7 +34,7 @@ function esc(value: unknown): string {
 
 function page(title: string, body: string): string {
   return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
-<style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;color:#222}h1{font-size:1.4rem}code{background:#f2f2f2;padding:.1em .3em;border-radius:3px}</style>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;color:#222}h1{font-size:1.4rem}code{background:#f2f2f2;padding:.1em .3em;border-radius:3px}.bad{color:#a4232b;font-weight:600}</style>
 <h1>${esc(title)}</h1>${body}`;
 }
 
@@ -46,9 +46,15 @@ function page(title: string, body: string): string {
  */
 const DONE = "<p>You can close this tab.</p>";
 const ALL_SET = `<p>Your Slack account is connected. Replies you write in a ticket thread go back to whoever asked, under your name.</p>${DONE}`;
-const PENDING =
-  `<p>Your Slack account is connected, so replies you write in a ticket thread still reach whoever asked.</p>` +
-  `<p>We could not finish setting you up to answer tickets automatically — someone on the team will sort that out. There is nothing more for you to do.</p>`;
+/**
+ * Not a milder kind of success. Somebody in this state who answers a ticket has their reply filed
+ * as the *asker's* own message, so saying "your replies still get through" would be telling them
+ * to go and do the one thing that makes a mess. Say it failed, and say not to answer anything yet.
+ */
+const NOT_SET_UP =
+  `<p class="bad">Your Slack sign-in worked, but we could not set you up to answer tickets.</p>` +
+  `<p>Please don't answer any tickets yet: until this is fixed, what you write would not be recorded as coming from you.</p>` +
+  `<p>Tell whoever runs this that your account could not be set up, and they will finish it off.</p>`;
 
 /** Find the Chatwoot agent (user) with this email in any bridged account. */
 export async function matchChatwootAgentByEmail(ctx: AppContext, email: string | undefined): Promise<ChatwootMatch | undefined> {
@@ -201,7 +207,7 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
       }
       const profile = await getSlackProfile(ctx.hub, userId);
       const { match } = await linkAgent(userId, { userToken, hcaEmail: state.hcaEmail, slackEmail: profile.email });
-      res.send(page(match ? "You're all set" : "Slack account connected", match ? ALL_SET : PENDING + hcaOffer(userId, Boolean(state.hcaEmail)) + DONE));
+      res.send(page(match ? "You're all set" : "Not set up yet", match ? ALL_SET : NOT_SET_UP + hcaOffer(userId, Boolean(state.hcaEmail))));
     } catch (err) {
       log.error("link callback failed", { error: err instanceof Error ? err.message : String(err) });
       res.status(500).send(page("Link failed", "<p>Something went wrong talking to Slack. <a href='/link'>Try again</a>.</p>"));
@@ -244,7 +250,7 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
     }
     const { match } = await linkAgent(slackUserId, { hcaEmail: email });
     log.info("finished a link from hack club auth", { slackUserId, matched: Boolean(match) });
-    res.send(page(match ? "You're all set" : "Slack account connected", match ? ALL_SET : PENDING + DONE));
+    res.send(page(match ? "You're all set" : "Not set up yet", match ? ALL_SET : NOT_SET_UP));
   }
 
   // ---- Admin sign-in: same OAuth v2 flow as /link (Slack forbids mixing OpenID scopes with
