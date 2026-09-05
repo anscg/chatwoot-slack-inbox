@@ -14,15 +14,19 @@ afterEach(() => {
 });
 
 /** Answer Hack Club Auth's endpoints; everything else (our own test server) goes out for real. */
-function stubHca(userinfo: Record<string, unknown>, onToken?: (body: URLSearchParams) => void): void {
+function stubHca(userinfo: Record<string, unknown>, opts: { onToken?: (body: URLSearchParams) => void; identity?: Record<string, unknown> } = {}): void {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url === "https://auth.hackclub.com/oauth/token") {
-      onToken?.(new URLSearchParams(String(init?.body)));
+      opts.onToken?.(new URLSearchParams(String(init?.body)));
       return new Response(JSON.stringify({ access_token: "hca-access" }), { headers: { "content-type": "application/json" } });
     }
     if (url === "https://auth.hackclub.com/oauth/userinfo") {
       return new Response(JSON.stringify(userinfo), { headers: { "content-type": "application/json" } });
+    }
+    if (url === "https://auth.hackclub.com/api/v1/me") {
+      if (!opts.identity) return new Response("nope", { status: 403 });
+      return new Response(JSON.stringify({ identity: opts.identity }), { headers: { "content-type": "application/json" } });
     }
     return realFetch(input as RequestInfo, init);
   }) as typeof fetch;
@@ -70,7 +74,8 @@ describe("linking an account, Hack Club Auth first", () => {
       expect(to.origin + to.pathname).toBe("https://auth.hackclub.com/oauth/authorize");
       expect(to.searchParams.get("client_id")).toBe("hca-client");
       expect(to.searchParams.get("redirect_uri")).toBe("https://bridge.test/link/hca/callback");
-      expect(to.searchParams.get("scope")).toBe("openid profile");
+      // email and slack_id are scopes here, not free claims: without them userinfo has no address.
+      expect(to.searchParams.get("scope")).toBe("openid profile email slack_id");
     });
   });
 
@@ -88,7 +93,7 @@ describe("linking an account, Hack Club Auth first", () => {
     const ctx = await setup();
     ctx.chatwootMock.listAgents.mockResolvedValue([{ id: 9, name: "Alice H", email: "alice@hackclub.com" }]);
     const tokenBody = vi.fn();
-    stubHca({ sub: "hca-1", email: "alice@hackclub.com", email_verified: true, slack_id: "U_ALICE" }, tokenBody);
+    stubHca({ sub: "hca-1", email: "alice@hackclub.com", email_verified: true, slack_id: "U_ALICE" }, { onToken: tokenBody });
 
     await withServer(ctx, async (base) => {
       const state = await hcaHalf(base);
@@ -120,6 +125,19 @@ describe("linking an account, Hack Club Auth first", () => {
 
     const [row] = await ctx.db.select().from(agents);
     expect(row).toMatchObject({ email: "alice@hackclub.com", emailSource: "hackclub", chatwootAgentId: null });
+  });
+
+  it("reads the address from /api/v1/me when the userinfo response has none", async () => {
+    const ctx = await setup();
+    ctx.chatwootMock.listAgents.mockResolvedValue([{ id: 9, name: "Alice H", email: "alice@hackclub.com" }]);
+    stubHca({ sub: "hca-1" }, { identity: { primary_email: "alice@hackclub.com", slack_id: "U_ALICE" } });
+
+    await withServer(ctx, async (base) => {
+      const state = await hcaHalf(base);
+      expect((await fetch(`${base}/link/callback?code=slack-code&state=${encodeURIComponent(state)}`)).status).toBe(200);
+    });
+
+    expect((await ctx.db.select().from(agents))[0]).toMatchObject({ chatwootAgentId: 9, email: "alice@hackclub.com" });
   });
 
   it("falls back to the Slack address when Hack Club Auth has no verified email", async () => {

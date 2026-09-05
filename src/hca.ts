@@ -31,12 +31,19 @@ export function hcaClient(config: Config, fetchFn: typeof fetch = fetch): HcaCli
   return { issuer: config.HCA_ISSUER, clientId: config.HCA_CLIENT_ID, clientSecret: config.HCA_CLIENT_SECRET, fetchFn };
 }
 
+/**
+ * `email` and `slack_id` are scopes of their own here, not claims that come free with `profile` —
+ * and the discovery document does not list them, so asking for `openid profile` alone gets a
+ * userinfo response with no address in it at all. These four are the ones open to everybody.
+ */
+export const HCA_SCOPES = "openid profile email slack_id";
+
 export function hcaAuthorizeUrl(hca: HcaClient, redirectUri: string, state: string): string {
   const url = new URL(`${hca.issuer}/oauth/authorize`);
   url.searchParams.set("client_id", hca.clientId);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", "openid profile");
+  url.searchParams.set("scope", HCA_SCOPES);
   url.searchParams.set("state", state);
   return url.toString();
 }
@@ -74,6 +81,26 @@ export async function hcaProfile(hca: HcaClient, code: string, redirectUri: stri
     name: typeof info.name === "string" ? info.name : undefined,
     slackId: typeof info.slack_id === "string" ? info.slack_id : undefined,
   };
+  // Hack Club Auth's own docs point at /api/v1/me rather than the OIDC userinfo endpoint, and the
+  // two do not always carry the same fields. Fill the gaps from there rather than sending somebody
+  // back empty-handed; a failure is not fatal, it just leaves us with what userinfo gave.
+  if (!profile.email || !profile.slackId) {
+    try {
+      const me = await hca.fetchFn(`${hca.issuer}/api/v1/me`, {
+        headers: { authorization: `Bearer ${token.access_token}`, accept: "application/json" },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (me.ok) {
+        const identity = ((await me.json()) as { identity?: Record<string, unknown> }).identity ?? {};
+        if (!profile.email && typeof identity.primary_email === "string") profile.email = identity.primary_email;
+        if (!profile.slackId && typeof identity.slack_id === "string") profile.slackId = identity.slack_id;
+      } else {
+        log.warn("hca /api/v1/me was unhelpful", { status: me.status });
+      }
+    } catch (err) {
+      log.warn("could not read the hca identity", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
   log.debug("hca profile", { sub: profile.sub, hasEmail: Boolean(profile.email), slackId: profile.slackId });
   return profile;
 }
