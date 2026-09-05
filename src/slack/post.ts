@@ -252,6 +252,17 @@ export async function postSystemMessage(bridge: Bridge, channel: string, threadT
 }
 
 /**
+ * A direct message from the bridge bot to one person. Slack opens the DM itself when the channel
+ * is a user ID; the app needs `im:write` on top of `chat:write`. Throttled per recipient, since
+ * these go out one per person as a channel's roster is worked through.
+ */
+export async function postDirectMessage(bridge: Bridge, userId: string, text: string): Promise<void> {
+  await throttle.run(`dm:${userId}`, async () => {
+    await bridge.slack.chat.postMessage({ channel: userId, text, unfurl_links: false, unfurl_media: false });
+  });
+}
+
+/**
  * Stamp (or unstamp) an emoji on a message as the bridge bot. Slack's "already reacted" and
  * "no reaction to remove" answers are the desired end state, not failures. Needs `reactions:write`.
  */

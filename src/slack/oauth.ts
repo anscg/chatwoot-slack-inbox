@@ -4,29 +4,54 @@ import { agentChatwootToken } from "../agents.js";
 import { loadActor } from "../admin/access.js";
 import type { AppContext } from "../context.js";
 import { encryptToken } from "../crypto.js";
-import { adminUsers } from "../db/schema.js";
+import { adminUsers, type Agent } from "../db/schema.js";
 import { hcaAuthorizeUrl, hcaClient, hcaProfile } from "../hca.js";
 import { log } from "../logger.js";
 import { ADMIN_COOKIE, ADMIN_SESSION_TTL_MS, Signer, type AdminSession } from "../session.js";
+import { provisionLinkedHelper } from "../helpers.js";
 import { upsertAgent } from "../store.js";
 import { getSlackProfile } from "./users.js";
 
 const STATE_TTL_MS = 10 * 60_000;
 
+/** Which side an address came from, in the order we trust it. See `agents.emailSource`. */
+type EmailSource = "chatwoot" | "hackclub" | "slack";
+
+interface ChatwootMatch {
+  id: number;
+  name: string;
+  email?: string;
+}
+
 interface LinkResult {
-  match: { id: number; name: string } | undefined;
-  /** True when we hold a Chatwoot token for them, so their Slack replies carry their own face. */
-  attributed: boolean;
+  match: ChatwootMatch | undefined;
+  row: Agent;
+}
+
+function esc(value: unknown): string {
+  return String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
 function page(title: string, body: string): string {
-  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
+  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;color:#222}h1{font-size:1.4rem}code{background:#f2f2f2;padding:.1em .3em;border-radius:3px}</style>
-<h1>${title}</h1>${body}`;
+<h1>${esc(title)}</h1>${body}`;
 }
 
+/**
+ * What somebody who just linked is told. Nothing here names Chatwoot tokens, the control panel or
+ * the service agent: the person reading it cannot act on any of that, and most of them have no
+ * business knowing it exists. Anything left to do is somebody else's job and is already visible on
+ * the helper roster.
+ */
+const DONE = "<p>You can close this tab.</p>";
+const ALL_SET = `<p>Your Slack account is connected. Replies you write in a ticket thread go back to whoever asked, under your name.</p>${DONE}`;
+const PENDING =
+  `<p>Your Slack account is connected, so replies you write in a ticket thread still reach whoever asked.</p>` +
+  `<p>We could not finish setting you up to answer tickets automatically — someone on the team will sort that out. There is nothing more for you to do.</p>`;
+
 /** Find the Chatwoot agent (user) with this email in any bridged account. */
-export async function matchChatwootAgentByEmail(ctx: AppContext, email: string | undefined): Promise<{ id: number; name: string } | undefined> {
+export async function matchChatwootAgentByEmail(ctx: AppContext, email: string | undefined): Promise<ChatwootMatch | undefined> {
   if (!email) return undefined;
   const wanted = email.toLowerCase();
   const seenAccounts = new Set<number>();
@@ -36,7 +61,7 @@ export async function matchChatwootAgentByEmail(ctx: AppContext, email: string |
     try {
       const agents = await bridge.chatwoot.listAgents();
       const hit = agents.find((a) => a.email?.toLowerCase() === wanted);
-      if (hit) return { id: hit.id, name: hit.name };
+      if (hit) return { id: hit.id, name: hit.name, email: hit.email };
     } catch (err) {
       log.warn("listAgents failed while matching email", { bridge: bridge.row.name, error: err instanceof Error ? err.message : String(err) });
     }
@@ -53,9 +78,27 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
   const adminRedirect = `${config.PUBLIC_URL}/admin/callback`;
   const secureCookie = config.PUBLIC_URL.startsWith("https://");
 
-  // ---- Agent linking: user scope chat:write so replies can be posted as the agent ----
+  // ---- Agent linking ----
+  //
+  // Two sign-ins, in this order:
+  //   1. Hack Club Auth, which is what Chatwoot itself signs people in with, so its email is the
+  //      one Chatwoot knows them by. Their Slack profile address is usually a different one, and
+  //      matching on it finds nobody — or worse, invites them a second, duplicate account.
+  //   2. Slack, for the user token that lets their replies be posted as them.
+  // Hack Club Auth is skippable and skipped entirely when this deployment has no app for it; the
+  // Slack address is then the only thing left to match on.
 
   const USER_SCOPES = "chat:write,files:write";
+
+  /** Where a Slack sign-in starts, carrying whatever the Hack Club step already established. */
+  function slackAuthorizeUrl(redirectUri: string, state: Record<string, unknown>): string {
+    const url = new URL("https://slack.com/oauth/v2/authorize");
+    url.searchParams.set("client_id", config.SLACK_CLIENT_ID);
+    url.searchParams.set("user_scope", USER_SCOPES);
+    url.searchParams.set("redirect_uri", redirectUri);
+    url.searchParams.set("state", signer.sign(state, STATE_TTL_MS));
+    return url.toString();
+  }
 
   /** Exchange an OAuth code for the authorizing user's id + user token. */
   async function exchangeCode(code: string, redirectUri: string): Promise<{ userId: string; userToken: string }> {
@@ -67,52 +110,98 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
   }
 
   /**
-   * Store the user token, match a Chatwoot agent by email, and — when a platform app is
-   * configured — fetch that agent's own Chatwoot token so both directions are attributed to them.
+   * Store what we now know about somebody: the Chatwoot agent their address matches, the address
+   * itself and where it came from, and — when a platform app is configured — that agent's own
+   * Chatwoot token, so both directions are attributed to them.
+   *
+   * The Hack Club address is tried first and kept even when it matches nothing, because it is
+   * still the address Chatwoot would have to invite; keeping the Slack one instead is what
+   * produces duplicate accounts.
    */
-  async function linkAgent(userId: string, userToken: string, email: string | undefined): Promise<LinkResult> {
-    const match = await matchChatwootAgentByEmail(ctx, email);
+  async function linkAgent(
+    userId: string,
+    opts: { userToken?: string; hcaEmail?: string; slackEmail?: string },
+  ): Promise<LinkResult> {
+    const slackEmail = opts.slackEmail?.toLowerCase() === opts.hcaEmail?.toLowerCase() ? undefined : opts.slackEmail;
+    const match = (await matchChatwootAgentByEmail(ctx, opts.hcaEmail)) ?? (await matchChatwootAgentByEmail(ctx, slackEmail));
+    const email = match?.email ?? opts.hcaEmail ?? opts.slackEmail;
+    const emailSource: EmailSource | undefined = match ? "chatwoot" : opts.hcaEmail ? "hackclub" : opts.slackEmail ? "slack" : undefined;
     const row = await upsertAgent(ctx.db, {
       slackUserId: userId,
-      email: email ?? null,
-      slackUserTokenEnc: encryptToken(userToken, config.TOKEN_ENCRYPTION_KEY),
+      ...(email ? { email, emailSource } : {}),
+      ...(opts.userToken ? { slackUserTokenEnc: encryptToken(opts.userToken, config.TOKEN_ENCRYPTION_KEY) } : {}),
       ...(match ? { chatwootAgentId: match.id } : {}),
     });
     const attributed = Boolean(await agentChatwootToken(ctx, row));
-    log.info("agent linked slack account", { slackUserId: userId, matched: Boolean(match), attributed });
-    return { match, attributed };
+    log.info("agent linked slack account", { slackUserId: userId, matched: Boolean(match), emailSource, attributed });
+    // They may have linked because a helper channel asked them to; finish that off now. Never let
+    // it break the link itself — the person is standing in front of the callback page.
+    await provisionLinkedHelper(ctx, userId).catch((err) =>
+      log.warn("could not follow up a link on the helper rosters", { slackUserId: userId, error: err instanceof Error ? err.message : String(err) }),
+    );
+    return { match, row };
   }
 
   router.get("/link", (_req: Request, res: Response) => {
-    const url = new URL("https://slack.com/oauth/v2/authorize");
-    url.searchParams.set("client_id", config.SLACK_CLIENT_ID);
-    url.searchParams.set("user_scope", USER_SCOPES);
-    url.searchParams.set("redirect_uri", linkRedirect);
-    url.searchParams.set("state", signer.sign({ purpose: "link" }, STATE_TTL_MS));
-    res.redirect(url.toString());
+    if (!hca) return void res.redirect(slackAuthorizeUrl(linkRedirect, { purpose: "link" }));
+    res.redirect(hcaAuthorizeUrl(hca, hcaRedirect, signer.sign({ purpose: "link-hca" }, STATE_TTL_MS)));
   });
 
-  router.get("/link/callback", async (req: Request, res: Response) => {
-    const state = signer.verify<{ purpose: string }>(String(req.query.state ?? ""));
-    if (!state || state.purpose !== "link") {
-      res.status(400).send(page("Link failed", "<p>Invalid or expired state. <a href='/link'>Try again</a>.</p>"));
+  /** The Slack half on its own, for anyone who cannot or will not use Hack Club Auth. */
+  router.get("/link/slack", (_req: Request, res: Response) => {
+    res.redirect(slackAuthorizeUrl(linkRedirect, { purpose: "link" }));
+  });
+
+  /**
+   * Come back from Hack Club Auth and carry the verified email into the Slack half. Nothing is
+   * written here: there is no Slack user token yet, and the person could still abandon the flow.
+   */
+  router.get("/link/hca/callback", async (req: Request, res: Response) => {
+    if (!hca) return void res.status(404).send(page("Not available", "<p>This bridge has no Hack Club Auth app configured.</p>"));
+    const state = signer.verify<{ purpose: string; slackUserId?: string }>(String(req.query.state ?? ""));
+    if (!state || state.purpose !== "link-hca") {
+      res.status(400).send(page("Sign-in failed", "<p>That took too long, or the link was not one of ours. <a href='/link'>Start again</a>.</p>"));
       return;
     }
     if (req.query.error) {
-      res.status(400).send(page("Link cancelled", `<p>Slack said: <code>${String(req.query.error)}</code>. <a href='/link'>Try again</a>.</p>`));
+      res.status(400).send(page("Sign-in cancelled", `<p>Hack Club Auth said: <code>${esc(req.query.error)}</code>.</p><p><a href='/link'>Start again</a>, or <a href='/link/slack'>continue with Slack only</a>.</p>`));
+      return;
+    }
+    try {
+      const profile = await hcaProfile(hca, String(req.query.code ?? ""), hcaRedirect);
+      const email = profile.emailVerified === false ? undefined : profile.email;
+      // Retry from a result page: they are already linked, so match and finish here.
+      if (state.slackUserId) return void (await finishRetry(res, state.slackUserId, profile.slackId, email));
+      if (!email) log.warn("hack club auth gave no verified email", { sub: profile.sub });
+      res.redirect(slackAuthorizeUrl(linkRedirect, { purpose: "link", hcaEmail: email, hcaSlackId: profile.slackId }));
+    } catch (err) {
+      log.error("hca callback failed", { error: err instanceof Error ? err.message : String(err) });
+      res.status(500).send(page("Sign-in failed", "<p>Something went wrong signing you in. <a href='/link'>Start again</a>, or <a href='/link/slack'>continue with Slack only</a>.</p>"));
+    }
+  });
+
+  router.get("/link/callback", async (req: Request, res: Response) => {
+    const state = signer.verify<{ purpose: string; hcaEmail?: string; hcaSlackId?: string }>(String(req.query.state ?? ""));
+    if (!state || state.purpose !== "link") {
+      res.status(400).send(page("Link failed", "<p>That took too long, or the link was not one of ours. <a href='/link'>Start again</a>.</p>"));
+      return;
+    }
+    if (req.query.error) {
+      res.status(400).send(page("Link cancelled", `<p>Slack said: <code>${esc(req.query.error)}</code>. <a href='/link'>Try again</a>.</p>`));
       return;
     }
     try {
       const { userId, userToken } = await exchangeCode(String(req.query.code ?? ""), linkRedirect);
+      // Hack Club Auth knows which Slack account it belongs to. A different one means the two
+      // halves are two different people, and matching them would hand over someone else's identity.
+      if (state.hcaSlackId && state.hcaSlackId !== userId) {
+        log.warn("hca sign-in is for a different slack account", { slack: userId, hca: state.hcaSlackId });
+        res.status(403).send(page("Different account", "<p>That Hack Club account belongs to a different Slack user. <a href='/link'>Start again</a> with the two that go together.</p>"));
+        return;
+      }
       const profile = await getSlackProfile(ctx.hub, userId);
-      const { match, attributed } = await linkAgent(userId, userToken, profile.email);
-
-      const matchNote = !match
-        ? `<p><strong>No Chatwoot agent with the email ${profile.email ?? "(none on your Slack profile)"} was found.</strong> Chatwoot replies will still post to Slack as you, but Slack replies count as contact messages until an admin attaches your Chatwoot API token in the control panel.</p>${hcaOffer(userId)}`
-        : attributed
-          ? `<p>Matched to Chatwoot agent <strong>${match.name}</strong> by email. Your Slack replies will be attributed to you in Chatwoot; Chatwoot replies will post to Slack as you.</p>`
-          : `<p>Matched to Chatwoot agent <strong>${match.name}</strong> by email. Chatwoot replies will post to Slack as you. Your Slack replies are posted by the bridge's service agent with your name on them until an admin attaches your Chatwoot API token in the control panel.</p>`;
-      res.send(page("Slack account linked", matchNote + "<p>You can close this tab.</p>"));
+      const { match } = await linkAgent(userId, { userToken, hcaEmail: state.hcaEmail, slackEmail: profile.email });
+      res.send(page(match ? "You're all set" : "Slack account connected", match ? ALL_SET : PENDING + hcaOffer(userId, Boolean(state.hcaEmail)) + DONE));
     } catch (err) {
       log.error("link callback failed", { error: err instanceof Error ? err.message : String(err) });
       res.status(500).send(page("Link failed", "<p>Something went wrong talking to Slack. <a href='/link'>Try again</a>.</p>"));
@@ -120,14 +209,13 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
   });
 
   /**
-   * The Slack email found nobody. A Hack Club account's email is often not the one on their Slack
-   * profile, so offer to ask Hack Club Auth — the same sign-in Chatwoot uses — which email that is.
+   * Offered when a link finished without a match and Hack Club Auth was never asked — the address
+   * on their Slack profile is usually not the one they sign in with.
    */
-  function hcaOffer(slackUserId: string): string {
-    if (!hca) return "";
-    const token = encodeURIComponent(signer.sign({ purpose: "link-hca", slackUserId }, STATE_TTL_MS));
-    return `<p>Do you sign in to Chatwoot with Hack Club Auth? Your email there is probably not the one on your Slack profile.
-<a href="/link/hca?t=${token}">Sign in with Hack Club Auth</a> and I'll match you by that email instead.</p>`;
+  function hcaOffer(slackUserId: string, alreadyAsked: boolean): string {
+    if (!hca || alreadyAsked) return "";
+    const token = encodeURIComponent(signer.sign({ purpose: "link-hca-retry", slackUserId }, STATE_TTL_MS));
+    return `<p>Do you sign in with a Hack Club account? <a href="/link/hca?t=${token}">Sign in with Hack Club Auth</a> and this may sort itself out.</p>`;
   }
 
   router.get("/link/hca", (req: Request, res: Response) => {
@@ -136,78 +224,34 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
       return;
     }
     const carried = signer.verify<{ purpose: string; slackUserId: string }>(String(req.query.t ?? ""));
-    if (!carried || carried.purpose !== "link-hca") {
+    if (!carried || carried.purpose !== "link-hca-retry") {
       res.status(400).send(page("Link failed", "<p>That link has expired. <a href='/link'>Start again</a>.</p>"));
       return;
     }
-    const state = signer.sign({ purpose: "link-hca", slackUserId: carried.slackUserId }, STATE_TTL_MS);
-    res.redirect(hcaAuthorizeUrl(hca, hcaRedirect, state));
+    res.redirect(hcaAuthorizeUrl(hca, hcaRedirect, signer.sign({ purpose: "link-hca", slackUserId: carried.slackUserId }, STATE_TTL_MS)));
   });
 
-  router.get("/link/hca/callback", async (req: Request, res: Response) => {
-    if (!hca) return void res.status(404).send(page("Not available", "<p>This bridge has no Hack Club Auth app configured.</p>"));
-    const state = signer.verify<{ purpose: string; slackUserId: string }>(String(req.query.state ?? ""));
-    if (!state || state.purpose !== "link-hca") {
-      res.status(400).send(page("Link failed", "<p>Invalid or expired state. <a href='/link'>Start again</a>.</p>"));
+  /** The retry half of the Hack Club callback: they are linked already, so match and report. */
+  async function finishRetry(res: Response, slackUserId: string, hcaSlackId: string | undefined, email: string | undefined): Promise<void> {
+    if (hcaSlackId && hcaSlackId !== slackUserId) {
+      log.warn("hca sign-in is for a different slack account", { slack: slackUserId, hca: hcaSlackId });
+      res.status(403).send(page("Different account", "<p>That Hack Club account belongs to a different Slack user. <a href='/link'>Start again</a> with the two that go together.</p>"));
       return;
     }
-    if (req.query.error) {
-      res.status(400).send(page("Link cancelled", `<p>Hack Club Auth said: <code>${String(req.query.error)}</code>. <a href='/link'>Start again</a>.</p>`));
+    if (!email) {
+      res.status(400).send(page("No verified email", `<p>Hack Club Auth gave us no verified email for that account, so there is nothing to go on.</p>${DONE}`));
       return;
     }
-    try {
-      const profile = await hcaProfile(hca, String(req.query.code ?? ""), hcaRedirect);
-      // Hack Club Auth knows which Slack account this is. If it names a different one, the person
-      // in front of us is not the one who just linked, and matching them would hand over someone
-      // else's Chatwoot identity.
-      if (profile.slackId && profile.slackId !== state.slackUserId) {
-        log.warn("hca sign-in is for a different slack account", { linked: state.slackUserId, hca: profile.slackId });
-        res.status(403).send(page("Different account", "<p>That Hack Club account belongs to a different Slack user. <a href='/link'>Start again</a> from the Slack account you want to link.</p>"));
-        return;
-      }
-      if (!profile.email || profile.emailVerified === false) {
-        res.status(400).send(page("No verified email", "<p>Hack Club Auth did not give a verified email for that account, so there is nothing to match on.</p>"));
-        return;
-      }
-      const match = await matchChatwootAgentByEmail(ctx, profile.email);
-      if (!match) {
-        res.send(
-          page(
-            "Still no match",
-            `<p>No Chatwoot agent has the email <code>${profile.email}</code> either. Your Slack account is still linked, so Chatwoot replies post to Slack as you. Ask an admin to attach your Chatwoot API token in the control panel.</p>`,
-          ),
-        );
-        return;
-      }
-      const row = await upsertAgent(ctx.db, { slackUserId: state.slackUserId, email: profile.email, chatwootAgentId: match.id });
-      const attributed = Boolean(await agentChatwootToken(ctx, row));
-      log.info("agent matched by hack club auth email", { slackUserId: state.slackUserId, chatwootAgentId: match.id, attributed });
-      res.send(
-        page(
-          "Matched",
-          `<p>Matched to Chatwoot agent <strong>${match.name}</strong> by your Hack Club Auth email.</p>` +
-            (attributed
-              ? "<p>Your Slack replies will be attributed to you in Chatwoot.</p>"
-              : "<p>Your Slack replies are posted by the bridge's service agent with your name on them until an admin attaches your Chatwoot API token.</p>") +
-            "<p>You can close this tab.</p>",
-        ),
-      );
-    } catch (err) {
-      log.error("hca callback failed", { error: err instanceof Error ? err.message : String(err) });
-      res.status(500).send(page("Link failed", "<p>Something went wrong talking to Hack Club Auth. <a href='/link'>Start again</a>.</p>"));
-    }
-  });
+    const { match } = await linkAgent(slackUserId, { hcaEmail: email });
+    log.info("finished a link from hack club auth", { slackUserId, matched: Boolean(match) });
+    res.send(page(match ? "You're all set" : "Slack account connected", match ? ALL_SET : PENDING + DONE));
+  }
 
   // ---- Admin sign-in: same OAuth v2 flow as /link (Slack forbids mixing OpenID scopes with
   // other user scopes in one app install). Signing in also links the admin's account. ----
 
   router.get("/admin/login", (_req: Request, res: Response) => {
-    const url = new URL("https://slack.com/oauth/v2/authorize");
-    url.searchParams.set("client_id", config.SLACK_CLIENT_ID);
-    url.searchParams.set("user_scope", USER_SCOPES);
-    url.searchParams.set("redirect_uri", adminRedirect);
-    url.searchParams.set("state", signer.sign({ purpose: "admin" }, STATE_TTL_MS));
-    res.redirect(url.toString());
+    res.redirect(slackAuthorizeUrl(adminRedirect, { purpose: "admin" }));
   });
 
   router.get("/admin/callback", async (req: Request, res: Response) => {
@@ -217,7 +261,7 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
       return;
     }
     if (req.query.error) {
-      res.status(400).send(page("Sign-in cancelled", `<p>Slack said: <code>${String(req.query.error)}</code>. <a href='/admin/login'>Try again</a>.</p>`));
+      res.status(400).send(page("Sign-in cancelled", `<p>Slack said: <code>${esc(req.query.error)}</code>. <a href='/admin/login'>Try again</a>.</p>`));
       return;
     }
     try {
@@ -232,13 +276,13 @@ export function registerSlackOAuth(router: Router, ctx: AppContext): void {
           .send(
             page(
               "Not allowed",
-              `<p>Slack user <code>${userId}</code> has not been given access to this control panel.</p><p>Ask whoever runs your program to invite you, or a superadmin to add you.</p>`,
+              `<p>Slack user <code>${esc(userId)}</code> has not been given access to this control panel.</p><p>Ask whoever runs your program to invite you, or a superadmin to add you.</p>`,
             ),
           );
         return;
       }
       const profile = await getSlackProfile(ctx.hub, userId);
-      await linkAgent(userId, userToken, profile.email); // panel users are usually agents too; no harm otherwise
+      await linkAgent(userId, { userToken, slackEmail: profile.email }); // panel users are usually agents too; no harm otherwise
       await ctx.db.update(adminUsers).set({ name: profile.name, lastSeenAt: new Date() }).where(eq(adminUsers.slackUserId, userId));
       const session: AdminSession = { userId, name: profile.name };
       res.cookie(ADMIN_COOKIE, signer.sign(session, ADMIN_SESSION_TTL_MS), {

@@ -224,6 +224,29 @@ export class ChatwootClient {
     return this.json<ChatwootAgent[]>("GET", `${this.appBase}/agents`, { token: this.opts.apiToken });
   }
 
+  /**
+   * Add somebody to this account's agents. Chatwoot keys the user on `email`: an address it
+   * already knows is added to the account as-is, and a new one creates a Chatwoot user and emails
+   * them an invitation. The caller decides which of those two is acceptable — see `provisionHelper`.
+   * Requires the token to belong to an administrator of the account.
+   */
+  async createAgent(input: { name: string; email: string; role?: "agent" | "administrator" }, apiToken?: string): Promise<ChatwootAgent> {
+    return this.json<ChatwootAgent>("POST", `${this.appBase}/agents`, {
+      token: apiToken ?? this.opts.apiToken,
+      body: { name: input.name, email: input.email, role: input.role ?? "agent" },
+    });
+  }
+
+  /**
+   * Take somebody off THIS ACCOUNT. Chatwoot destroys the account membership only: the user
+   * record, their login and everything they ever wrote survive, and re-adding them by the same
+   * email finds the same user again. There is deliberately no method here for the Platform API's
+   * user-delete endpoint — this bridge never deletes a Chatwoot account.
+   */
+  async removeAgentFromAccount(agentId: number, apiToken?: string): Promise<void> {
+    await this.json("DELETE", `${this.appBase}/agents/${agentId}`, { token: apiToken ?? this.opts.apiToken });
+  }
+
   /** Validate an access token and return its user profile, including the accounts it belongs to. */
   async whoAmI(apiToken: string): Promise<ChatwootProfile> {
     return this.json<ChatwootProfile>("GET", `${this.opts.baseUrl}/api/v1/profile`, { token: apiToken });

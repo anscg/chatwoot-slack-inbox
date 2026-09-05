@@ -118,6 +118,74 @@ describe("reaction_added over the real Bolt wiring", () => {
   });
 });
 
+describe("helper channel membership over the real Bolt wiring", () => {
+  /** A bridge whose helper channel is C_TEAM, wired through Bolt as in production. */
+  async function helperSetup(auto: "off" | "existing" | "all") {
+    const ctx = await makeContext({ bridge: false });
+    (ctx.bridges as unknown as { opts: { onBoltApp: unknown } }).opts.onBoltApp = (app: Parameters<typeof registerSlackEvents>[0], id: number) =>
+      registerSlackEvents(app, ctx, id);
+    registerSlackJobs(ctx);
+    const { registerHelperJobs } = await import("../src/helpers.js");
+    registerHelperJobs(ctx);
+    const { addBridge } = await import("./helpers.js");
+    await addBridge(ctx, { helperChannel: "C_TEAM", helperAutoProvision: auto });
+    return ctx;
+  }
+
+  const membershipEvent = (type: "member_joined_channel" | "member_left_channel", channel: string, user = "U_HELPER") =>
+    JSON.stringify({
+      type: "event_callback",
+      event_id: `Ev${Math.random().toString(36).slice(2)}`,
+      team_id: "T1",
+      api_app_id: "A1",
+      event: { type, user, channel, event_ts: "1700000000.000300" },
+    });
+
+  it("records a join in the helper channel", async () => {
+    const ctx = await helperSetup("off");
+    const { url, close } = await serve(ctx);
+    try {
+      const body = membershipEvent("member_joined_channel", "C_TEAM");
+      expect((await fetch(url, { method: "POST", headers: headers(body, "application/json"), body })).status).toBe(200);
+      await flush();
+      const { findHelperMember } = await import("../src/helpers.js");
+      const id = ctx.bridges.forChannel("C_HELP")!.row.id;
+      expect((await findHelperMember(ctx.db, id, "U_HELPER"))!.inChannel).toBe(true);
+      expect(ctx.chatwootMock.createAgent).not.toHaveBeenCalled();
+    } finally {
+      close();
+    }
+  });
+
+  it("ignores joins in every other channel, the question channel included", async () => {
+    const ctx = await helperSetup("all");
+    const { url, close } = await serve(ctx);
+    try {
+      const body = membershipEvent("member_joined_channel", "C_HELP");
+      await fetch(url, { method: "POST", headers: headers(body, "application/json"), body });
+      await flush();
+      const { findHelperMember } = await import("../src/helpers.js");
+      expect(await findHelperMember(ctx.db, ctx.bridges.forChannel("C_HELP")!.row.id, "U_HELPER")).toBeUndefined();
+      expect(ctx.chatwootMock.createAgent).not.toHaveBeenCalled();
+    } finally {
+      close();
+    }
+  });
+
+  it("does not count a redelivery of the same join twice", async () => {
+    const ctx = await helperSetup("all");
+    const { url, close } = await serve(ctx);
+    try {
+      const body = membershipEvent("member_joined_channel", "C_TEAM");
+      for (let i = 0; i < 2; i++) await fetch(url, { method: "POST", headers: headers(body, "application/json"), body });
+      await flush();
+      expect(ctx.chatwootMock.createAgent).toHaveBeenCalledTimes(1);
+    } finally {
+      close();
+    }
+  });
+});
+
 describe("block_actions over the real Bolt wiring", () => {
   it("routes a Resolve click through to Chatwoot", async () => {
     const ctx = await setup();

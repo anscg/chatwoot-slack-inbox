@@ -1,5 +1,6 @@
 import type { App } from "@slack/bolt";
 import { agentChatwootToken } from "../agents.js";
+import { JOB_HELPER_JOINED, JOB_HELPER_LEFT } from "../helpers.js";
 import type { Bridge } from "../bridges.js";
 import { ChatwootHttpError } from "../chatwoot/client.js";
 import type { AppContext } from "../context.js";
@@ -806,6 +807,25 @@ export function registerSlackEvents(app: App, ctx: AppContext, bridgeId: number)
       await respond({ response_type: "ephemeral", replace_original: true, text }).catch((err) =>
         log.warn("could not answer the follow-up prompt", { error: err instanceof Error ? err.message : String(err) }),
       );
+    });
+  }
+
+  // Helper-channel membership. Only the bridge's own helper channel is watched, and the join or
+  // departure is only ever *recorded* here; whether it provisions anybody is decided in helpers.ts.
+  for (const [name, kind] of [
+    ["member_joined_channel", JOB_HELPER_JOINED],
+    ["member_left_channel", JOB_HELPER_LEFT],
+  ] as const) {
+    app.event(name, async ({ event, body }) => {
+      const ev = event as unknown as { channel?: string; user?: string };
+      const bridge = ctx.bridges.get(bridgeId);
+      if (!bridge?.row.helperChannel || ev.channel !== bridge.row.helperChannel) return;
+      if (!ev.user || ev.user === bridge.botUserId) return;
+      const eventId = (body as { event_id?: string }).event_id ?? `${name}:${ev.channel}:${ev.user}`;
+      // Slack re-delivers on a slow ack; a duplicate join would otherwise nudge the burst guard.
+      if (!(await markEventSeen(ctx.db, eventId))) return;
+      recordTraffic(bridgeId, "decision", `${name} ${ev.user}`);
+      await ctx.retry.runOrEnqueue(kind, { bridgeId, slackUserId: ev.user });
     });
   }
 

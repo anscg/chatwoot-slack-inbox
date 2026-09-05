@@ -92,6 +92,27 @@
       "when": 1788512085700,
       "tag": "0012_admin_roles",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1788580869164,
+      "tag": "0013_helper_channel",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1788588992875,
+      "tag": "0014_helper_link_prompt",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1788618724418,
+      "tag": "0015_agent_email_source",
+      "breakpoints": true
     }
   ]
 }

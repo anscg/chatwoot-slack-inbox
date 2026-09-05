@@ -23,6 +23,17 @@ export const REOPEN_PROMPT_TIMEOUT_MESSAGE =
 export const DEFAULT_LINK_PROMPT = "Before you can post here, link your Slack account: {link}";
 
 /**
+ * Direct message to somebody in a bridge's helper channel whose Chatwoot identity we cannot
+ * confirm. Asking is always better than guessing: a Hack Club account's Chatwoot address is often
+ * not the one on their Slack profile, and inviting the Slack one gives them a second login rather
+ * than the account they already use. `{link}` becomes the link URL, `{channel}` the helper channel.
+ */
+export const DEFAULT_HELPER_LINK_PROMPT =
+  "Hi! You're in <#{channel}>, so you'll need an account on the ticket dashboard to answer with. Set yourself up here and I'll sort out the rest: {link}\n\nIt takes about twenty seconds — sign in with your Hack Club account, then with Slack.";
+/** Nobody is asked twice inside this window, however often they leave and rejoin. */
+export const HELPER_LINK_ASK_COOLDOWN_MS = 7 * 24 * 60 * 60_000;
+
+/**
  * Shown privately to someone who replied with "Also send to #channel" ticked. The copy Slack posts
  * in the channel is not part of the thread, so only they can tidy it away.
  */

@@ -22,8 +22,19 @@ import type { Db } from "../db/client.js";
 import { recentTraffic } from "../diagnostics.js";
 import { encryptToken } from "../crypto.js";
 import { adminUsers, agents, bridgeMembers, bridges, relayed, retries, threads } from "../db/schema.js";
+import {
+  askHelpersToLink,
+  listHelperEvents,
+  listHelperMembers,
+  provisionHelpers,
+  resumeHelperAutoProvision,
+  reviewHelpers,
+  skipHelper,
+  unlinkHelper,
+  unskipHelper,
+} from "../helpers.js";
 import { log } from "../logger.js";
-import { DEFAULT_FOLLOWUP_PROMPT, DEFAULT_LINK_PROMPT, DEFAULT_REOPEN_BUTTON_LABEL, DEFAULT_REOPEN_MESSAGE, DEFAULT_REOPEN_PROMPT, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_MESSAGE, DEFAULT_RESOLVED_EMOJI, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
+import { DEFAULT_FOLLOWUP_PROMPT, DEFAULT_HELPER_LINK_PROMPT, DEFAULT_LINK_PROMPT, DEFAULT_REOPEN_BUTTON_LABEL, DEFAULT_REOPEN_MESSAGE, DEFAULT_REOPEN_PROMPT, DEFAULT_RESOLVE_BUTTON_LABEL, DEFAULT_RESOLVE_MESSAGE, DEFAULT_RESOLVED_EMOJI, DEFAULT_WELCOME_MESSAGE } from "../messages.js";
 import { ADMIN_COOKIE, parseCookies, Signer, type AdminSession } from "../session.js";
 import { bridgeManifest, SLUG_RE, slugify } from "../slack/manifest.js";
 
@@ -40,6 +51,9 @@ export const REQUIRED_BOT_SCOPES = [
   "users:read",
   "users:read.email",
 ];
+
+/** Extra scopes a bridge only needs once it watches a helper channel; private channels need these. */
+export const HELPER_BOT_SCOPES = ["groups:read", "im:write"];
 
 const reactionField = z
   .string()
@@ -88,8 +102,24 @@ const bridgeInput = z.object({
   followupPromptMessage: messageField,
   requireLink: z.boolean().optional(),
   linkPromptMessage: messageField,
+  /** Blank unlinks the helper channel; the roster and its history are kept either way. */
+  helperChannel: z
+    .string()
+    .trim()
+    .transform((v) => (v === "" ? null : v))
+    .refine((v) => v === null || /^[CG][A-Z0-9]+$/.test(v), "Slack channel ID like C0123456789")
+    .nullable()
+    .optional(),
+  helperAutoProvision: z.enum(["off", "existing", "all"]).optional(),
+  helperLinkPrompt: messageField,
+  helperOffboarding: z.enum(["keep", "unlink"]).optional(),
+  helperMaxBatch: z.coerce.number().int().min(1).max(200).optional(),
+  helperChatwootRole: z.enum(["agent", "administrator"]).optional(),
   enabled: z.boolean().optional(),
 });
+
+/** The fields that decide who gets a Chatwoot account; a bridge's operators may not touch them. */
+const HELPER_SETTINGS = ["helperChannel", "helperAutoProvision", "helperOffboarding", "helperMaxBatch", "helperChatwootRole", "helperLinkPrompt"] as const;
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 const wrap = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => fn(req, res).catch(next);
@@ -173,6 +203,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
         reopenPromptMessage: DEFAULT_REOPEN_PROMPT,
         followupPromptMessage: DEFAULT_FOLLOWUP_PROMPT,
         linkPromptMessage: DEFAULT_LINK_PROMPT,
+        helperLinkPrompt: DEFAULT_HELPER_LINK_PROMPT,
       },
     });
   });
@@ -319,6 +350,13 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           followupPromptMessage: d.followupPromptMessage === undefined ? DEFAULT_FOLLOWUP_PROMPT : d.followupPromptMessage,
           requireLink: d.requireLink ?? false,
           linkPromptMessage: d.linkPromptMessage === undefined ? DEFAULT_LINK_PROMPT : d.linkPromptMessage,
+          // A helper channel starts inert: membership is tracked, nobody is provisioned until asked.
+          helperChannel: d.helperChannel ?? null,
+          helperAutoProvision: d.helperAutoProvision ?? "off",
+          helperLinkPrompt: d.helperLinkPrompt === undefined ? DEFAULT_HELPER_LINK_PROMPT : d.helperLinkPrompt,
+          helperOffboarding: d.helperOffboarding ?? "unlink",
+          ...(d.helperMaxBatch !== undefined ? { helperMaxBatch: d.helperMaxBatch } : {}),
+          helperChatwootRole: d.helperChatwootRole ?? "agent",
           enabled: d.enabled ?? true,
         })
         .returning();
@@ -340,6 +378,9 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
       const existing = await bridgeFor(req, res, "configure");
       if (!existing) return;
       const d = input.data;
+      // Who gets a Chatwoot account is an ownership decision, not a configuration one.
+      const touchesHelpers = HELPER_SETTINGS.some((k) => d[k] !== undefined && d[k] !== existing[k]);
+      if (touchesHelpers && !guard(req, res, canAdministerBridge(actorOf(req), id), "only an admin of this bridge can change who gets a Chatwoot account")) return;
       const accountId = d.chatwootAccountId ?? existing.chatwootAccountId;
       const inbox = d.chatwootInboxIdentifier ?? existing.chatwootInboxIdentifier;
       const channel = d.slackChannel ?? existing.slackChannel;
@@ -381,6 +422,14 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           ...(d.followupPromptMessage !== undefined ? { followupPromptMessage: d.followupPromptMessage } : {}),
           ...(d.requireLink !== undefined ? { requireLink: d.requireLink } : {}),
           ...(d.linkPromptMessage !== undefined ? { linkPromptMessage: d.linkPromptMessage } : {}),
+          ...(d.helperChannel !== undefined ? { helperChannel: d.helperChannel } : {}),
+          ...(d.helperAutoProvision !== undefined ? { helperAutoProvision: d.helperAutoProvision } : {}),
+          ...(d.helperLinkPrompt !== undefined ? { helperLinkPrompt: d.helperLinkPrompt } : {}),
+          ...(d.helperOffboarding !== undefined ? { helperOffboarding: d.helperOffboarding } : {}),
+          ...(d.helperMaxBatch !== undefined ? { helperMaxBatch: d.helperMaxBatch } : {}),
+          ...(d.helperChatwootRole !== undefined ? { helperChatwootRole: d.helperChatwootRole } : {}),
+          // Pointing the bridge at a different channel clears a pause that was about the old one.
+          ...(d.helperChannel !== undefined && d.helperChannel !== existing.helperChannel ? { helperPausedAt: null, helperPausedReason: null } : {}),
           ...(d.enabled !== undefined ? { enabled: d.enabled } : {}),
           updatedAt: new Date(),
         })
@@ -421,6 +470,8 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
           followupPromptMessage: Boolean(row.followupPromptMessage),
           requireLink: row.requireLink,
           linkPromptMessage: Boolean(row.linkPromptMessage),
+          helperChannel: row.helperChannel,
+          helperAutoProvision: row.helperAutoProvision,
         },
       };
       const [{ n: threadCount } = { n: 0 }] = await db
@@ -438,13 +489,22 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
             bot: auth.user_id,
             team: auth.team,
             scopes,
-            missingScopes: REQUIRED_BOT_SCOPES.filter((s) => !scopes.includes(s)),
+            // groups:read only matters once a helper channel is watched, so don't nag bridges without one.
+            missingScopes: [...REQUIRED_BOT_SCOPES, ...(row.helperChannel ? HELPER_BOT_SCOPES : [])].filter((s) => !scopes.includes(s)),
           };
           try {
             const info = await bridge.slack.conversations.info({ channel: row.slackChannel });
             slack.channel = { id: row.slackChannel, name: info.channel?.name, isMember: Boolean(info.channel?.is_member) };
           } catch (err) {
             slack.channel = { id: row.slackChannel, error: err instanceof Error ? err.message : String(err) };
+          }
+          if (row.helperChannel) {
+            try {
+              const info = await bridge.slack.conversations.info({ channel: row.helperChannel });
+              slack.helperChannel = { id: row.helperChannel, name: info.channel?.name, isMember: Boolean(info.channel?.is_member) };
+            } catch (err) {
+              slack.helperChannel = { id: row.helperChannel, error: err instanceof Error ? err.message : String(err) };
+            }
           }
           out.slack = slack;
         } catch (err) {
@@ -542,6 +602,165 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
       }
       await db.delete(bridgeMembers).where(and(eq(bridgeMembers.bridgeId, row.id), eq(bridgeMembers.slackUserId, slackUserId)));
       log.info("bridge member removed", { bridge: row.name, slackUserId, by: actorOf(req).slackUserId });
+      res.status(204).end();
+    }),
+  );
+
+  // ---- helper roster: who answers tickets, and who that makes an agent in Chatwoot ----
+
+  /**
+   * Load the bridge and its live registry entry for a helper action. Provisioning creates and
+   * removes Chatwoot accounts, so it needs a bridge admin rather than merely an operator.
+   */
+  async function helperBridgeFor(req: Request, res: Response, need: "configure" | "administer" = "administer") {
+    const row = await bridgeFor(req, res, need);
+    if (!row) return undefined;
+    if (!row.helperChannel) {
+      badRequest(res, "this bridge has no helper channel yet");
+      return undefined;
+    }
+    const bridge = ctx.bridges.get(row.id);
+    if (!bridge) {
+      badRequest(res, "this bridge is disabled or failed to load, so its Slack and Chatwoot clients are unavailable");
+      return undefined;
+    }
+    return bridge;
+  }
+
+  /** The tracked roster and its history — cheap, no Slack or Chatwoot calls. */
+  api.get(
+    "/bridges/:id/helpers",
+    wrap(async (req, res) => {
+      const row = await bridgeFor(req, res, "configure");
+      if (!row) return;
+      const [members, events] = await Promise.all([listHelperMembers(db, row.id), listHelperEvents(db, row.id)]);
+      res.json({
+        canProvision: canAdministerBridge(actorOf(req), row.id),
+        channel: row.helperChannel,
+        autoProvision: row.helperAutoProvision,
+        offboarding: row.helperOffboarding,
+        maxBatch: row.helperMaxBatch,
+        chatwootRole: row.helperChatwootRole,
+        linkPrompt: row.helperLinkPrompt,
+        paused: row.helperPausedAt ? { at: row.helperPausedAt, reason: row.helperPausedReason } : null,
+        members,
+        events,
+      });
+    }),
+  );
+
+  /**
+   * Read the helper channel and work out what provisioning each person would actually do. This
+   * is a POST because it reconciles who is still in the channel, but it never provisions or
+   * unlinks anybody — that always takes a second, explicit request naming the people.
+   */
+  api.post(
+    "/bridges/:id/helpers/review",
+    wrap(async (req, res) => {
+      const bridge = await helperBridgeFor(req, res, "configure");
+      if (!bridge) return;
+      try {
+        res.json({ ...(await reviewHelpers(ctx, bridge)), canProvision: canAdministerBridge(actorOf(req), bridge.row.id) });
+      } catch (err) {
+        badRequest(res, `Could not read ${bridge.row.helperChannel}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }),
+  );
+
+  /**
+   * Provision the named people and nobody else. `expected` is the count the reviewer saw on
+   * screen; a mismatch means the list they approved is not the list that arrived, so we refuse
+   * rather than guess. The per-bridge batch limit is enforced again inside `provisionHelpers`.
+   */
+  api.post(
+    "/bridges/:id/helpers/provision",
+    wrap(async (req, res) => {
+      const bridge = await helperBridgeFor(req, res);
+      if (!bridge) return;
+      const input = z
+        .object({ slackUserIds: z.array(z.string().trim().regex(SLACK_USER_RE)).min(1).max(200), expected: z.number().int().nonnegative() })
+        .safeParse(req.body);
+      if (!input.success) return badRequest(res, zodMsg(input.error));
+      const ids = [...new Set(input.data.slackUserIds)];
+      if (ids.length !== input.data.expected) {
+        return badRequest(res, `you approved ${input.data.expected} ${input.data.expected === 1 ? "person" : "people"} but ${ids.length} arrived; review the list again`);
+      }
+      try {
+        const results = await provisionHelpers(ctx, bridge, ids, { actor: actorOf(req).slackUserId });
+        res.json({ results });
+      } catch (err) {
+        badRequest(res, err instanceof Error ? err.message : String(err));
+      }
+    }),
+  );
+
+  /**
+   * Ask the named people to link their account, instead of inviting a guessed address. Same
+   * approve-the-exact-count contract as provisioning, because this sends real direct messages.
+   */
+  api.post(
+    "/bridges/:id/helpers/ask",
+    wrap(async (req, res) => {
+      const bridge = await helperBridgeFor(req, res);
+      if (!bridge) return;
+      const input = z
+        .object({ slackUserIds: z.array(z.string().trim().regex(SLACK_USER_RE)).min(1).max(200), expected: z.number().int().nonnegative() })
+        .safeParse(req.body);
+      if (!input.success) return badRequest(res, zodMsg(input.error));
+      const ids = [...new Set(input.data.slackUserIds)];
+      if (ids.length !== input.data.expected) {
+        return badRequest(res, `you approved ${input.data.expected} ${input.data.expected === 1 ? "person" : "people"} but ${ids.length} arrived; review the list again`);
+      }
+      try {
+        res.json({ results: await askHelpersToLink(ctx, bridge, ids, { actor: actorOf(req).slackUserId }) });
+      } catch (err) {
+        badRequest(res, err instanceof Error ? err.message : String(err));
+      }
+    }),
+  );
+
+  /** Take one person off this bridge's Chatwoot account. Their Chatwoot user is never deleted. */
+  api.post(
+    "/bridges/:id/helpers/:slackUserId/unlink",
+    wrap(async (req, res) => {
+      const bridge = await helperBridgeFor(req, res);
+      if (!bridge) return;
+      try {
+        res.json({ detail: await unlinkHelper(ctx, bridge, String(req.params.slackUserId), actorOf(req).slackUserId) });
+      } catch (err) {
+        badRequest(res, err instanceof Error ? err.message : String(err));
+      }
+    }),
+  );
+
+  /** "Not this one." Keeps them off every future automatic run until somebody undoes it. */
+  api.post(
+    "/bridges/:id/helpers/:slackUserId/skip",
+    wrap(async (req, res) => {
+      const row = await bridgeFor(req, res, "administer");
+      if (!row) return;
+      await skipHelper(ctx, row.id, String(req.params.slackUserId), actorOf(req).slackUserId);
+      res.status(204).end();
+    }),
+  );
+
+  api.delete(
+    "/bridges/:id/helpers/:slackUserId/skip",
+    wrap(async (req, res) => {
+      const row = await bridgeFor(req, res, "administer");
+      if (!row) return;
+      await unskipHelper(ctx, row.id, String(req.params.slackUserId), actorOf(req).slackUserId);
+      res.status(204).end();
+    }),
+  );
+
+  /** Clear the burst guard. Nobody who joined while it was tripped is provisioned retroactively. */
+  api.post(
+    "/bridges/:id/helpers/resume",
+    wrap(async (req, res) => {
+      const row = await bridgeFor(req, res, "administer");
+      if (!row) return;
+      await resumeHelperAutoProvision(ctx, row.id, actorOf(req).slackUserId);
       res.status(204).end();
     }),
   );
@@ -706,6 +925,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
     slackUserId: a.slackUserId,
     chatwootAgentId: a.chatwootAgentId,
     email: a.email,
+    emailSource: a.emailSource,
     hasSlackToken: Boolean(a.slackUserTokenEnc),
     hasChatwootToken: Boolean(a.chatwootApiTokenEnc),
     createdAt: a.createdAt,
@@ -802,7 +1022,9 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
       }
       const [row] = await db
         .update(agents)
-        .set({ chatwootAgentId: agentId ?? null, ...(email !== undefined ? { email } : {}) })
+        // A human picked this Chatwoot user, so the address on it is theirs — record that, or the
+        // helper roster goes on treating a Slack profile address as the only thing it has.
+        .set({ chatwootAgentId: agentId ?? null, ...(email !== undefined ? { email, emailSource: "admin" as const } : {}) })
         .where(eq(agents.id, id))
         .returning();
       if (!row) return void res.status(404).json({ error: "not found" });
@@ -828,7 +1050,7 @@ export function registerAdminApi(router: Router, ctx: AppContext, opts: AdminApi
       }
       const [row] = await db
         .update(agents)
-        .set({ chatwootApiTokenEnc: enc(input.data.apiToken), chatwootAgentId: profile.id, email: profile.email ?? null })
+        .set({ chatwootApiTokenEnc: enc(input.data.apiToken), chatwootAgentId: profile.id, email: profile.email ?? null, emailSource: profile.email ? ("chatwoot" as const) : null })
         .where(eq(agents.id, id))
         .returning();
       if (!row) return void res.status(404).json({ error: "not found" });

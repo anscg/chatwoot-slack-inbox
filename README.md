@@ -73,9 +73,16 @@ The flow this is built for: a superadmin makes a program author an **admin**; th
 
 ## Agents linking their accounts
 
-Every agent should visit `${PUBLIC_URL}/link` once (admins get linked automatically when they sign in to the panel). It runs a Slack OAuth flow (user scopes `chat:write`, `files:write`) and stores the user token encrypted; replies made in Chatwoot are then posted to Slack **from the agent's own Slack account** via `chat.postMessage`. Their Slack email is matched against the agents of every bridged Chatwoot account to find their Chatwoot user.
+Every agent should visit `${PUBLIC_URL}/link` once (admins get linked automatically when they sign in to the panel). It is two sign-ins, in this order:
 
-Some people's Chatwoot email is not their Slack one — Hack Club Auth accounts often carry a different address — and the email match then finds nobody. Set `HCA_CLIENT_ID` and `HCA_CLIENT_SECRET` (and `HCA_ISSUER` if you are not on <https://auth.hackclub.com>) and the "no agent found" page offers a second, optional step: sign in with [Hack Club Auth](https://auth.hackclub.com/docs/welcome), and the email that comes back is matched instead. Register the app there with `${PUBLIC_URL}/link/hca/callback` as its redirect URI; the bridge asks only for `openid profile`. Hack Club Auth also reports which Slack account a Hack Club account belongs to, and a sign-in naming a different one is refused, so nobody can claim someone else's Chatwoot identity. Leave the two variables unset and the step does not exist.
+1. **Hack Club Auth**, if this deployment has an app for it. This is what Chatwoot itself signs people in with, so the email it returns is the one Chatwoot knows them by. It is verified, and it comes back with the Slack account it belongs to.
+2. **Slack** (user scopes `chat:write`, `files:write`). The user token is stored encrypted; replies made in Chatwoot are then posted to Slack **from the agent's own Slack account** via `chat.postMessage`.
+
+The Hack Club address is what the Chatwoot agent lookup runs against, with the Slack profile address as the fallback — and it is stored either way, even when it matches nobody, because it is still the address Chatwoot would have to invite. Matching on the Slack address instead is what creates duplicate Chatwoot accounts for people. If Hack Club Auth names a *different* Slack account than the one that then signs in, the link is refused, so nobody can claim someone else's Chatwoot identity.
+
+Set `HCA_CLIENT_ID` and `HCA_CLIENT_SECRET` (and `HCA_ISSUER` if you are not on <https://auth.hackclub.com>) to turn the first step on, registering `${PUBLIC_URL}/link/hca/callback` as the app's redirect URI at [Hack Club Auth](https://auth.hackclub.com/docs/welcome); the bridge asks only for `openid profile`. Leave the two unset and `/link` is the Slack step alone. Anyone who cannot get through Hack Club Auth can go straight to `${PUBLIC_URL}/link/slack`, and a link that finished without a match offers the Hack Club step as a second chance.
+
+The pages people see at the end of this say whether they are set up and nothing else. They do not mention Chatwoot tokens, the control panel or the service agent: the person reading has no way to act on any of it, and most of them will never have a reason to know it exists. What is left to do shows up on the helper roster instead, where somebody can actually do it.
 
 If an agent replies before linking, the message still reaches Slack (posted by the bridge's bot with the agent's name and avatar) and the agent gets a private note in the conversation pointing them to `/link`.
 
@@ -94,6 +101,56 @@ Set `CHATWOOT_PLATFORM_TOKEN` and the bridge fetches each token itself, at `/lin
    Re-run it after adding agents to Chatwoot, or the bridge falls back to the service agent for them.
 
 Chatwoot Cloud has no super admin console, so there it stays manual: anyone who runs the bridge attaches the agent's access token on the panel's *Agents* page.
+
+## Giving helpers Chatwoot accounts
+
+A bridge can watch a second Slack channel — the one the people who *answer* tickets are in — and turn its membership into agents on that bridge's Chatwoot account. Set it under *Edit* → **Helpers**, then manage it from the **Helpers** button on the bridge.
+
+Setting the channel provisions nobody. It only starts tracking who is in it. Everything else is deliberate, because the failure mode here is loud and hard to undo: one `/invite` of a big user group must not become fifty Chatwoot invitation emails.
+
+**Reviewing.** *Review the channel* reads Slack and Chatwoot and sorts everyone into what provisioning them would actually do:
+
+| | what happens | ticked by default |
+|---|---|---|
+| already agents | nothing in Chatwoot; the bridge just records that it knows them | – (nothing to do) |
+| Chatwoot knows them | added to this account — no new login, no email | yes |
+| would be a new account | a Chatwoot user is created and emailed an invitation | **no** |
+| cannot be provisioned | a bot, or no email to key a user on | never |
+
+Reviewing is a read: it provisions and unlinks nobody. The button that does the work names the count — *Provision 7 people* — and says how many of those are new accounts. Provisioning sends the exact list of people the reviewer saw, and the server refuses it if the count does not match what they approved.
+
+**Where the email comes from.** Chatwoot keys users on email, so provisioning needs one. The bridge takes it from the `agents` row written at `/link` if there is one, and otherwise from the Slack profile (`users:read.email`; without that scope everyone lands in *cannot be provisioned*).
+
+Having linked is not itself evidence, though. What counts is where the address came from, which `/link` records on the row (`agents.email_source`), and the review screen labels each address by it:
+
+- **confirmed** — matched to a Chatwoot user. These are the *already an agent* and *Chatwoot knows them* buckets.
+- **verified by Hack Club Auth** — the address they sign in with. Not proof Chatwoot has them, but it is the right address to invite.
+- **set by hand in this panel** — an admin picked their Chatwoot user for them.
+- **their Slack profile address** — nothing has confirmed Chatwoot knows it.
+
+Only the first is trusted for provisioning. That last case is the trap: a Hack Club account's Chatwoot address is often not the one on their Slack profile, so inviting the Slack address hands them a *second* Chatwoot login instead of the account they already use.
+
+**So the bridge asks rather than guesses.** Anyone it cannot identify gets one direct message from the bridge bot pointing them at `/link` — at most once a week per person, never to a bot, and never to somebody a human has skipped. The moment they link and Chatwoot recognises them, they are provisioned automatically, with no further clicks by anyone. That holds even on a bridge set to provision nobody automatically: having been sent the message *is* the decision, and it still never invites anyone Chatwoot has not already got a user for. That is the whole loop:
+
+```
+joins #helpers ──▶ can we identify them?
+                     yes ──▶ provisioned
+                     no  ──▶ DM: "link your account" ──▶ they link ──▶ provisioned
+```
+
+The message text is a per-bridge setting (`{link}` and `{channel}` are substituted); blank never asks. It goes out on a join under the `existing` and `all` policies, and the review screen has an **Ask N to link** button for doing it to people already in the channel. Asking creates nothing in Chatwoot, and the same batch limit and burst guard cover it, so a mass invite cannot become a mass DM either. Needs `im:write` on the bridge's Slack app.
+
+**Joining and leaving.** With the bot in that channel and its Slack app subscribed to `member_joined_channel` and `member_left_channel`, every join and departure is recorded. What the bridge does with a join is a per-bridge setting:
+
+- **record it, wait for a human** (the default) — nothing is provisioned.
+- **if Chatwoot already has their user** — they are added to the account; anyone Chatwoot has never seen waits for review.
+- **including new users** — an address is guessed from their Slack profile and an invitation goes out. Only right on an install where Slack emails *are* the Chatwoot emails.
+
+More joins than the bridge's batch limit within ten minutes stops automatic provisioning altogether and asks for a human. Nobody is dropped by that: they sit in the roster as `pending` until somebody clears the pause and reviews them.
+
+**Nothing is ever deleted.** Leaving the channel at most takes someone off that Chatwoot *account* — their Chatwoot user, its login and everything they wrote stay exactly where they are, and coming back later finds the same user rather than making a second one. There is no code path in this project that deletes a Chatwoot account; the client class does not even have a method for it. Set offboarding to *just record it* and even the account membership is left alone. Roster rows are kept forever too, so the panel can always answer who was provisioned, by whom, and when.
+
+Requirements: the bridge's Chatwoot service token must belong to an **administrator** of the account (the review screen says so plainly if it does not), and its Slack app needs `im:write` to send the link requests, plus `groups:read` if the helper channel is private. Only a bridge's *admins* may provision, unlink, or change any of these settings — its operators can look.
 
 ## How it behaves
 

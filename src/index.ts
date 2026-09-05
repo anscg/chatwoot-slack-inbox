@@ -13,6 +13,7 @@ import { createDb, runMigrations } from "./db/client.js";
 import { adminUsers } from "./db/schema.js";
 import { log, setLogLevel } from "./logger.js";
 import { RetryQueue } from "./retry.js";
+import { registerHelperJobs } from "./helpers.js";
 import { registerSlackEvents, registerSlackJobs } from "./slack/events.js";
 import { registerSlackOAuth } from "./slack/oauth.js";
 import { registerSetupRoutes } from "./setup.js";
@@ -61,6 +62,7 @@ async function main(): Promise<void> {
   if (bridges.all().length === 0) log.warn("no enabled bridges yet; see setup page", { setupUrl: `${config.PUBLIC_URL}/setup`, adminUrl: `${config.PUBLIC_URL}/admin/` });
 
   registerSlackJobs(ctx);
+  registerHelperJobs(ctx);
 
   const app = express();
   app.disable("x-powered-by");

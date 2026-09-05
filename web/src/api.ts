@@ -36,7 +36,7 @@ export interface Me {
   can: { createBridge: boolean; managePeople: boolean; seeOps: boolean };
   chatwootBaseUrl: string;
   publicUrl: string;
-  defaults: { welcomeMessage: string; resolvedEmoji: string; resolveButtonLabel: string; reopenButtonLabel: string; resolveMessage: string; reopenMessage: string; reopenPromptMessage: string; followupPromptMessage: string; linkPromptMessage: string };
+  defaults: { welcomeMessage: string; resolvedEmoji: string; resolveButtonLabel: string; reopenButtonLabel: string; resolveMessage: string; reopenMessage: string; reopenPromptMessage: string; followupPromptMessage: string; linkPromptMessage: string; helperLinkPrompt: string };
 }
 export interface Status {
   /** Superadmins only: it embeds the install-wide Chatwoot webhook secret. */
@@ -68,6 +68,14 @@ export interface Bridge {
   followupPromptMessage: string | null;
   requireLink: boolean;
   linkPromptMessage: string | null;
+  helperChannel: string | null;
+  helperAutoProvision: HelperAutoProvision;
+  helperLinkPrompt: string | null;
+  helperOffboarding: "keep" | "unlink";
+  helperMaxBatch: number;
+  helperChatwootRole: "agent" | "administrator";
+  helperPausedAt: string | null;
+  helperPausedReason: string | null;
   enabled: boolean;
   hasChatwootToken: boolean;
   createdAt: string;
@@ -75,6 +83,82 @@ export interface Bridge {
   warning?: string;
   /** The signed-in person's role on this bridge; superadmins read as "admin". */
   yourRole: BridgeRole | null;
+}
+
+export type HelperAutoProvision = "off" | "existing" | "all";
+/** What provisioning one person would actually do in Chatwoot. */
+export type HelperBucket = "member" | "existing" | "invite" | "blocked";
+export type HelperState = "pending" | "provisioned" | "unlinked" | "skipped" | "blocked" | "failed";
+
+export interface HelperCandidate {
+  slackUserId: string;
+  name: string;
+  email: string | null;
+  emailSource: "chatwoot" | "hackclub" | "admin" | "slack" | null;
+  chatwootUserId: number | null;
+  bucket: HelperBucket;
+  reason: string;
+  state: HelperState | null;
+  inChannel: boolean;
+  linkAskedAt: string | null;
+}
+export interface AskResult {
+  slackUserId: string;
+  ok: boolean;
+  detail: string;
+}
+export interface HelperReview {
+  channel: string;
+  memberCount: number;
+  truncated: boolean;
+  maxBatch: number;
+  autoProvision: HelperAutoProvision;
+  offboarding: "keep" | "unlink";
+  paused: { at: string; reason: string } | null;
+  serviceToken: { role: string | null; canProvision: boolean; error?: string };
+  candidates: HelperCandidate[];
+  departed: HelperCandidate[];
+  canProvision: boolean;
+}
+export interface HelperMemberRow {
+  slackUserId: string;
+  name: string | null;
+  email: string | null;
+  chatwootUserId: number | null;
+  state: HelperState;
+  inChannel: boolean;
+  lastError: string | null;
+  linkAskedAt: string | null;
+  provisionedAt: string | null;
+  unlinkedAt: string | null;
+  updatedAt: string;
+}
+export interface HelperEventRow {
+  id: number;
+  slackUserId: string | null;
+  action: string;
+  detail: string | null;
+  actor: string | null;
+  createdAt: string;
+}
+export interface HelperRoster {
+  canProvision: boolean;
+  channel: string | null;
+  autoProvision: HelperAutoProvision;
+  offboarding: "keep" | "unlink";
+  maxBatch: number;
+  chatwootRole: "agent" | "administrator";
+  linkPrompt: string | null;
+  paused: { at: string; reason: string | null } | null;
+  members: HelperMemberRow[];
+  events: HelperEventRow[];
+}
+export interface ProvisionResult {
+  slackUserId: string;
+  ok: boolean;
+  bucket: HelperBucket;
+  detail: string;
+  chatwootUserId?: number;
 }
 
 export interface BridgeMember {
@@ -103,6 +187,7 @@ export interface Agent {
   slackUserId: string;
   chatwootAgentId: number | null;
   email: string | null;
+  emailSource: "chatwoot" | "hackclub" | "admin" | "slack" | null;
   hasSlackToken: boolean;
   hasChatwootToken: boolean;
   createdAt: string;
@@ -151,6 +236,8 @@ export interface BridgeCheck {
     followupPromptMessage: boolean;
     requireLink: boolean;
     linkPromptMessage: boolean;
+    helperChannel: string | null;
+    helperAutoProvision: HelperAutoProvision;
   };
   slack?: {
     bot?: string;
@@ -158,6 +245,7 @@ export interface BridgeCheck {
     scopes?: string[];
     missingScopes?: string[];
     channel?: { id: string; name?: string; isMember?: boolean; error?: string };
+    helperChannel?: { id: string; name?: string; isMember?: boolean; error?: string };
     error?: string;
   };
   chatwoot?: { ok?: boolean; accountId?: number; agents?: number; error?: string };

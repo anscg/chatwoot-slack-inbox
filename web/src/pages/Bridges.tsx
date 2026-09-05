@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { api, type Bridge, type BridgeCheck, type BridgeMembers, type BridgeRole, type Introspection, type Me, type SlackIntrospection } from "../api";
+import { api, type Bridge, type BridgeCheck, type BridgeMembers, type BridgeRole, type HelperAutoProvision, type Introspection, type Me, type SlackIntrospection } from "../api";
 import { Copy, fmtDate, useResource } from "./common";
+import { HelpersPanel } from "./Helpers";
 
 interface Draft {
   name: string;
@@ -23,6 +24,12 @@ interface Draft {
   followupPromptMessage: string;
   requireLink: boolean;
   linkPromptMessage: string;
+  helperChannel: string;
+  helperAutoProvision: HelperAutoProvision;
+  helperLinkPrompt: string;
+  helperOffboarding: "keep" | "unlink";
+  helperMaxBatch: string;
+  helperChatwootRole: "agent" | "administrator";
   enabled: boolean;
 }
 
@@ -47,6 +54,12 @@ const EMPTY: Draft = {
   followupPromptMessage: "",
   requireLink: false,
   linkPromptMessage: "",
+  helperChannel: "",
+  helperAutoProvision: "off",
+  helperLinkPrompt: "",
+  helperOffboarding: "unlink",
+  helperMaxBatch: "25",
+  helperChatwootRole: "agent",
   enabled: true,
 };
 
@@ -77,6 +90,12 @@ function fromBridge(b: Bridge): Draft {
     followupPromptMessage: b.followupPromptMessage ?? "",
     requireLink: b.requireLink,
     linkPromptMessage: b.linkPromptMessage ?? "",
+    helperChannel: b.helperChannel ?? "",
+    helperAutoProvision: b.helperAutoProvision,
+    helperLinkPrompt: b.helperLinkPrompt ?? "",
+    helperOffboarding: b.helperOffboarding,
+    helperMaxBatch: String(b.helperMaxBatch),
+    helperChatwootRole: b.helperChatwootRole,
     enabled: b.enabled,
   };
 }
@@ -87,6 +106,7 @@ export function Bridges({ me }: { me: Me }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [check, setCheck] = useState<BridgeCheck | "loading" | null>(null);
   const [members, setMembers] = useState<Bridge | null>(null);
+  const [helpers, setHelpers] = useState<Bridge | null>(null);
 
   return (
     <>
@@ -151,7 +171,16 @@ export function Bridges({ me }: { me: Me }) {
                     button: {b.resolveButtonLabel ? <code>{b.resolveButtonLabel}</code> : <span className="pill off">off</span>} /{" "}
                     {b.reopenButtonLabel ? <code>{b.reopenButtonLabel}</code> : <span className="pill off">off</span>}
                   </td>
-                  <td>{b.enabled ? <span className="pill ok">enabled</span> : <span className="pill off">disabled</span>}</td>
+                  <td>
+                    {b.enabled ? <span className="pill ok">enabled</span> : <span className="pill off">disabled</span>}
+                    {b.helperChannel && (
+                      <div className="note">
+                        helpers <code>{b.helperChannel}</code>
+                        <br />
+                        auto: {b.helperAutoProvision}
+                      </div>
+                    )}
+                  </td>
                   <td>
                     <span className="pill">{b.yourRole ?? "—"}</span>
                   </td>
@@ -175,6 +204,9 @@ export function Bridges({ me }: { me: Me }) {
                     </button>{" "}
                     <button className="small" onClick={() => setMembers(b)}>
                       People
+                    </button>{" "}
+                    <button className="small" onClick={() => setHelpers(b)}>
+                      Helpers
                     </button>{" "}
                     {b.yourRole === "admin" && (
                       <button
@@ -201,6 +233,7 @@ export function Bridges({ me }: { me: Me }) {
       </div>
       {check && <CheckPanel check={check} onClose={() => setCheck(null)} />}
       {members && <MembersPanel bridge={members} onClose={() => setMembers(null)} />}
+      {helpers && <HelpersPanel bridge={helpers} onClose={() => setHelpers(null)} />}
       {editing && (
         <BridgeForm
           me={me}
@@ -258,6 +291,21 @@ function CheckPanel({ check, onClose }: { check: BridgeCheck | "loading"; onClos
             label="Bot in the channel"
             detail={s?.channel?.error ? <span className="err">{s.channel.error}</span> : s?.channel?.isMember ? `#${s.channel.name}` : <span className="err">invite it to #{s?.channel?.name ?? s?.channel?.id}</span>}
           />
+          {b.helperChannel && (
+            <Row
+              ok={s?.helperChannel ? Boolean(s.helperChannel.isMember) : null}
+              label="Bot in the helper channel"
+              detail={
+                s?.helperChannel?.error ? (
+                  <span className="err">{s.helperChannel.error}</span>
+                ) : s?.helperChannel?.isMember ? (
+                  `#${s.helperChannel.name} — joins are ${b.helperAutoProvision === "off" ? "recorded for review" : `provisioned automatically (${b.helperAutoProvision})`}`
+                ) : (
+                  <span className="err">invite it to #{s?.helperChannel?.name ?? b.helperChannel}, or joins and departures never arrive</span>
+                )
+              }
+            />
+          )}
           <Row ok={check.chatwoot?.ok ?? null} label="Chatwoot service token" detail={check.chatwoot?.error ? <span className="err">{check.chatwoot.error}</span> : `account ${check.chatwoot?.accountId}, ${check.chatwoot?.agents} agents`} />
           <Row ok={check.threads > 0} label="Threads bridged so far" detail={String(check.threads)} />
           <Row ok={Boolean(b.resolvedEmoji)} label="Bot stamps when resolved" detail={b.resolvedEmoji ? `:${b.resolvedEmoji}: on the question, removed when reopened` : "off"} />
@@ -400,6 +448,12 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
       followupPromptMessage: d.followupPromptMessage,
       requireLink: d.requireLink,
       linkPromptMessage: d.linkPromptMessage,
+      helperChannel: d.helperChannel,
+      helperAutoProvision: d.helperAutoProvision,
+      helperLinkPrompt: d.helperLinkPrompt,
+      helperOffboarding: d.helperOffboarding,
+      helperMaxBatch: Number(d.helperMaxBatch),
+      helperChatwootRole: d.helperChatwootRole,
       enabled: d.enabled,
     };
     try {
@@ -616,6 +670,61 @@ function BridgeForm({ me, bridge, onDone, onCancel }: { me: Me; bridge: Bridge |
             Held back for up to 10 minutes while they choose: a separate question opens a ticket as usual, a follow-up opens none and they are asked to move it
             into their earlier thread. No answer means it goes through as a separate question.
           </p>
+        </div>
+      </div>
+
+      <h3 className="step">5. Helpers</h3>
+      <p className="note">
+        A second Slack channel — the one the people who answer tickets are in. Its membership is tracked, and its members can be given agent accounts on
+        Chatwoot account {d.chatwootAccountId || "…"}. Setting a channel here provisions nobody: open <strong>Helpers</strong> on the bridge and review the list
+        first. Invite this bridge&apos;s bot to that channel, and give its Slack app the <code>member_joined_channel</code> and{" "}
+        <code>member_left_channel</code> events.
+      </p>
+      <div className="form-grid">
+        <div className="field">
+          <label>Helper channel ID (blank = track nobody)</label>
+          <input value={d.helperChannel} onChange={set("helperChannel")} pattern="[CG][A-Z0-9]+" placeholder="C0123456789" />
+        </div>
+        <div className="field">
+          <label>When somebody joins that channel</label>
+          <select value={d.helperAutoProvision} onChange={(e) => setD((x) => ({ ...x, helperAutoProvision: e.target.value as HelperAutoProvision }))}>
+            <option value="off">record it, and wait for a human — safest</option>
+            <option value="existing">provision them if Chatwoot already has their user</option>
+            <option value="all">provision them, inviting new Chatwoot users too</option>
+          </select>
+          <p className="note">
+            Anyone whose Chatwoot identity cannot be confirmed is sent the message below instead of having an address guessed at, and is provisioned the moment
+            they link. Beyond the limit below in ten minutes, the bridge stops both — a mass invite into Slack must not become a mass invite into Chatwoot.
+          </p>
+        </div>
+        <div className="field" style={{ gridColumn: "1 / -1" }}>
+          <label>Message sent to a helper we cannot identify (blank = never ask, guess or wait instead)</label>
+          <textarea rows={3} value={d.helperLinkPrompt} onChange={set("helperLinkPrompt")} placeholder={me.defaults.helperLinkPrompt} />
+          <p className="note">
+            A direct message from this bridge&apos;s bot, at most once a week per person. <code>{"{link}"}</code> becomes the link URL and{" "}
+            <code>{"{channel}"}</code> the helper channel. Needs <code>im:write</code> on the bridge&apos;s Slack app.
+          </p>
+        </div>
+        <div className="field">
+          <label>When somebody leaves it</label>
+          <select value={d.helperOffboarding} onChange={(e) => setD((x) => ({ ...x, helperOffboarding: e.target.value as "keep" | "unlink" }))}>
+            <option value="unlink">take them off the Chatwoot account</option>
+            <option value="keep">just record it, leave Chatwoot alone</option>
+          </select>
+          <p className="note">Neither deletes a Chatwoot user. Unlinking removes their membership of this one account; everything they wrote stays.</p>
+        </div>
+        <div className="field">
+          <label>Most people provisioned at once</label>
+          <input type="number" min={1} max={200} value={d.helperMaxBatch} onChange={set("helperMaxBatch")} />
+          <p className="note">Also the burst limit: more joins than this within ten minutes pauses automatic provisioning until someone looks.</p>
+        </div>
+        <div className="field">
+          <label>Chatwoot role they get</label>
+          <select value={d.helperChatwootRole} onChange={(e) => setD((x) => ({ ...x, helperChatwootRole: e.target.value as "agent" | "administrator" }))}>
+            <option value="agent">agent</option>
+            <option value="administrator">administrator</option>
+          </select>
+          <p className="note">The bridge&apos;s own Chatwoot token has to be an administrator of the account for any of this to work.</p>
         </div>
       </div>
 

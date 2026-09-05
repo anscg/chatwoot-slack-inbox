@@ -43,6 +43,42 @@ export const bridges = pgTable(
      * first, asking whether it is really separate; null disables the whole check.
      */
     followupPromptMessage: text("followup_prompt_message"),
+    /**
+     * The Slack channel the people who answer tickets live in — a different channel from the one
+     * questions are asked in. Its membership is mirrored into `helperMembers` and, when the bridge
+     * is set up for it, into the Chatwoot account as agents. Null means the bridge tracks nobody.
+     */
+    helperChannel: text("helper_channel"),
+    /**
+     * How far the bridge goes on its own when somebody joins that channel.
+     *   off      — record the join and wait for a human to review it in the panel (the default).
+     *   existing — provision only people Chatwoot already has a user for; nobody is ever invited.
+     *   all      — also invite people Chatwoot has never seen, creating their Chatwoot user.
+     * Anything not provisioned automatically is left `pending`, never dropped.
+     */
+    helperAutoProvision: text("helper_auto_provision", { enum: ["off", "existing", "all"] }).notNull().default("off"),
+    /**
+     * What leaving the channel means. `unlink` takes them off this Chatwoot *account*; `keep`
+     * only records the departure. Neither ever deletes a Chatwoot user — see `unlinkHelper`.
+     */
+    helperOffboarding: text("helper_offboarding", { enum: ["keep", "unlink"] }).notNull().default("unlink"),
+    /**
+     * The most people one provisioning run may touch, and the number of joins within ten minutes
+     * that trips the burst guard. It exists so a mass-invite into the helper channel cannot turn
+     * into a mass-invite into Chatwoot.
+     */
+    helperMaxBatch: integer("helper_max_batch").notNull().default(25),
+    /**
+     * Direct message sent to a helper whose Chatwoot identity we cannot confirm, asking them to
+     * link at /link rather than having an account guessed at from their Slack address. `{link}`
+     * and `{channel}` are substituted. Null never asks.
+     */
+    helperLinkPrompt: text("helper_link_prompt"),
+    /** Chatwoot role given to someone this bridge provisions. */
+    helperChatwootRole: text("helper_chatwoot_role", { enum: ["agent", "administrator"] }).notNull().default("agent"),
+    /** Set when the burst guard tripped. Auto-provisioning stays off until a human clears it. */
+    helperPausedAt: timestamp("helper_paused_at", { withTimezone: true }),
+    helperPausedReason: text("helper_paused_reason"),
     /** When on, nothing a Slack user writes is relayed until they have linked their account at /link. */
     requireLink: boolean("require_link").notNull().default(false),
     /** Private nudge shown to an unlinked sender whose message was held back; null stays silent. */
@@ -96,6 +132,70 @@ export const bridgeMembers = pgTable(
   (t) => [uniqueIndex("bridge_members_uq").on(t.bridgeId, t.slackUserId), index("bridge_members_user_idx").on(t.slackUserId)],
 );
 
+/**
+ * One row per person the bridge has ever seen in a bridge's helper channel. Rows are never
+ * deleted: leaving flips `inChannel` and, at most, unlinks them from the Chatwoot account, so
+ * that rejoining later finds the same Chatwoot user again instead of making a second one.
+ *
+ * `state` is about Chatwoot, `inChannel` is about Slack; the two move independently.
+ *   pending     — known, not provisioned. Everything starts here.
+ *   provisioned — an agent on this bridge's Chatwoot account because of this bridge.
+ *   unlinked    — was provisioned, then taken off the account. The Chatwoot user still exists.
+ *   skipped     — a human said "not this one". Auto-provisioning leaves them alone.
+ *   blocked     — cannot be provisioned: a bot, or no email to key a Chatwoot user on.
+ *   failed      — Chatwoot refused; `lastError` says why.
+ */
+export const helperMembers = pgTable(
+  "helper_members",
+  {
+    id: serial("id").primaryKey(),
+    bridgeId: integer("bridge_id")
+      .notNull()
+      .references(() => bridges.id, { onDelete: "cascade" }),
+    slackUserId: text("slack_user_id").notNull(),
+    /** Cached Slack profile, so the panel reads as people rather than IDs even when Slack is down. */
+    name: text("name"),
+    email: text("email"),
+    /** The Chatwoot user we matched or created. Kept after unlinking, on purpose. */
+    chatwootUserId: integer("chatwoot_user_id"),
+    state: text("state", { enum: ["pending", "provisioned", "unlinked", "skipped", "blocked", "failed"] }).notNull().default("pending"),
+    /** Are they in the Slack channel right now? */
+    inChannel: boolean("in_channel").notNull().default(true),
+    lastError: text("last_error"),
+    /** When we last asked them to link, so nobody is nagged about it twice in a week. */
+    linkAskedAt: timestamp("link_asked_at", { withTimezone: true }),
+    joinedAt: timestamp("joined_at", { withTimezone: true }),
+    leftAt: timestamp("left_at", { withTimezone: true }),
+    provisionedAt: timestamp("provisioned_at", { withTimezone: true }),
+    unlinkedAt: timestamp("unlinked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("helper_members_uq").on(t.bridgeId, t.slackUserId), index("helper_members_bridge_idx").on(t.bridgeId)],
+);
+
+/**
+ * Append-only log of what happened to a helper roster: joins, departures, provisioning and
+ * whoever ordered it. This is the answer to "who added all these agents?", and the burst guard
+ * counts recent joins here rather than trusting a counter in memory.
+ */
+export const helperEvents = pgTable(
+  "helper_events",
+  {
+    id: serial("id").primaryKey(),
+    bridgeId: integer("bridge_id")
+      .notNull()
+      .references(() => bridges.id, { onDelete: "cascade" }),
+    slackUserId: text("slack_user_id"),
+    action: text("action", { enum: ["joined", "left", "provisioned", "unlinked", "skipped", "failed", "paused", "resumed", "blocked", "asked"] }).notNull(),
+    detail: text("detail"),
+    /** Slack user ID of the panel operator who ordered it; null when the bridge acted on its own. */
+    actor: text("actor"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("helper_events_bridge_idx").on(t.bridgeId, t.createdAt)],
+);
+
 /** One row per bridged Slack thread <-> Chatwoot conversation. */
 export const threads = pgTable(
   "threads",
@@ -137,6 +237,16 @@ export const agents = pgTable(
     slackUserId: text("slack_user_id").notNull(),
     chatwootAgentId: integer("chatwoot_agent_id"),
     email: text("email"),
+    /**
+     * Where `email` came from, which is what decides whether provisioning may act on it:
+     *   chatwoot — it belongs to the Chatwoot user we matched them to; nothing is better than this.
+     *   hackclub — Hack Club Auth handed it over verified, so it is the address they sign in with.
+     *   admin    — a human in the control panel set it.
+     *   slack    — only their Slack profile says so, and nothing has confirmed Chatwoot knows it.
+     * Null on rows written before this column existed; callers fall back to guessing from the
+     * Slack profile address.
+     */
+    emailSource: text("email_source", { enum: ["chatwoot", "hackclub", "admin", "slack"] }),
     slackUserTokenEnc: text("slack_user_token_enc"),
     chatwootApiTokenEnc: text("chatwoot_api_token_enc"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -224,6 +334,9 @@ export const retries = pgTable(
 export type BridgeRow = typeof bridges.$inferSelect;
 export type AdminUser = typeof adminUsers.$inferSelect;
 export type BridgeMember = typeof bridgeMembers.$inferSelect;
+export type HelperMember = typeof helperMembers.$inferSelect;
+export type HelperEvent = typeof helperEvents.$inferSelect;
+export type HelperState = HelperMember["state"];
 export type Thread = typeof threads.$inferSelect;
 export type Agent = typeof agents.$inferSelect;
 export type Retry = typeof retries.$inferSelect;

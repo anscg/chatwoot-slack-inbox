@@ -250,3 +250,67 @@ describe("ops pages", () => {
     });
   });
 });
+
+describe("the helper roster over the API", () => {
+  /** The bridge from `withApi`, pointed at a helper channel with `members` in it. */
+  async function pointAtHelperChannel(ctx: TestContext, members: string[]) {
+    const id = await bridgeId(ctx, "help");
+    await ctx.db.update(bridges).set({ helperChannel: "C_TEAM" }).where(eq(bridges.id, id));
+    await ctx.bridges.reload();
+    ctx.bridges.get(id)!.chatwoot = ctx.chatwootMock as never;
+    ctx.slackMock.conversations.members.mockImplementation(async () => ({ ok: true, members }));
+    return id;
+  }
+
+  it("lets an operator look but not provision", async () => {
+    await withApi(async (base, ctx) => {
+      const id = await pointAtHelperChannel(ctx, ["U0NEW00001"]);
+      await person(ctx, "U_OP", "operator", { id, role: "operator" });
+      const them = as(base, "U_OP");
+
+      const review = await them.post(`/bridges/${id}/helpers/review`);
+      expect(review.status).toBe(200);
+      expect(review.body.canProvision).toBe(false);
+      expect((await them.post(`/bridges/${id}/helpers/provision`, { slackUserIds: ["U0NEW00001"], expected: 1 })).status).toBe(403);
+      // Nor may they quietly switch auto-provisioning on for themselves.
+      expect((await them.put(`/bridges/${id}`, { helperAutoProvision: "all" })).status).toBe(403);
+      expect(ctx.chatwootMock.createAgent).not.toHaveBeenCalled();
+    });
+  });
+
+  it("refuses a list that is not the length the reviewer approved", async () => {
+    await withApi(async (base, ctx) => {
+      const id = await pointAtHelperChannel(ctx, ["U0ONE00001", "U0TWO00001"]);
+      await person(ctx, "U_OWNER", "admin", { id, role: "admin" });
+      const res = await as(base, "U_OWNER").post(`/bridges/${id}/helpers/provision`, { slackUserIds: ["U0ONE00001", "U0TWO00001"], expected: 1 });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("you approved 1");
+      expect(ctx.chatwootMock.createAgent).not.toHaveBeenCalled();
+    });
+  });
+
+  it("provisions the named people for a bridge admin and logs who did it", async () => {
+    await withApi(async (base, ctx) => {
+      const id = await pointAtHelperChannel(ctx, ["U0ONE00001", "U0TWO00001"]);
+      await person(ctx, "U_OWNER", "admin", { id, role: "admin" });
+      const res = await as(base, "U_OWNER").post(`/bridges/${id}/helpers/provision`, { slackUserIds: ["U0ONE00001"], expected: 1 });
+      expect(res.status).toBe(200);
+      expect(res.body.results).toHaveLength(1);
+      expect(ctx.chatwootMock.createAgent).toHaveBeenCalledTimes(1);
+
+      const roster = (await as(base, "U_OWNER").get(`/bridges/${id}/helpers`)).body;
+      expect(roster.members.map((m: { slackUserId: string }) => m.slackUserId)).toEqual(["U0ONE00001"]);
+      expect(roster.events.some((e: { action: string; actor: string }) => e.action === "provisioned" && e.actor === "U_OWNER")).toBe(true);
+    });
+  });
+
+  it("says so plainly when the bridge has no helper channel", async () => {
+    await withApi(async (base, ctx) => {
+      const id = await bridgeId(ctx, "help");
+      await person(ctx, "U_OWNER", "admin", { id, role: "admin" });
+      const res = await as(base, "U_OWNER").post(`/bridges/${id}/helpers/review`);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("no helper channel");
+    });
+  });
+});

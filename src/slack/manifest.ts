@@ -22,6 +22,8 @@ oauth_config:
       - files:write
       - users:read
       - users:read.email
+      - groups:read
+      - im:write
 settings:
   interactivity:
     is_enabled: true
@@ -31,6 +33,8 @@ settings:
     bot_events:
       - message.channels
       - reaction_added
+      - member_joined_channel
+      - member_left_channel
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false

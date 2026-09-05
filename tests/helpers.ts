@@ -57,6 +57,8 @@ export function mockChatwoot(): MockChatwoot {
     toggleStatusAsAgent: vi.fn(async () => undefined),
     assignConversation: vi.fn(async () => undefined),
     listAgents: vi.fn(async () => []),
+    createAgent: vi.fn(async ({ name, email }: { name: string; email: string }) => ({ id: 900 + email.length, name, email })),
+    removeAgentFromAccount: vi.fn(async () => undefined),
     whoAmI: vi.fn(async () => ({ id: 7, name: "Agent", email: "agent@example.com", accounts: [{ id: 1, name: "Acct" }] })),
     listInboxes: vi.fn(async () => []),
   } as unknown as MockChatwoot;
@@ -72,7 +74,9 @@ export interface MockSlack {
   };
   files: { uploadV2: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
   reactions: { add: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> };
-  conversations: { history: ReturnType<typeof vi.fn>; replies: ReturnType<typeof vi.fn> };
+  conversations: { history: ReturnType<typeof vi.fn>; replies: ReturnType<typeof vi.fn>; members: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> };
+  /** Only the hub client ever uses this, when someone comes back from a Slack sign-in. */
+  oauth: { v2: { access: ReturnType<typeof vi.fn> } };
 }
 
 export function mockSlack(): MockSlack {
@@ -81,6 +85,8 @@ export function mockSlack(): MockSlack {
     conversations: {
       history: vi.fn(async ({ latest }: { latest: string }) => ({ ok: true, messages: [{ ts: latest }] })),
       replies: vi.fn(async ({ ts }: { ts: string }) => ({ ok: true, messages: [{ ts, subtype: "tombstone" }] })),
+      members: vi.fn(async () => ({ ok: true, members: [] as string[] })),
+      info: vi.fn(async () => ({ ok: true, channel: { name: "helpers", is_member: true } })),
     },
     files: {
       uploadV2: vi.fn(async () => ({ ok: true, files: [{ files: [{ id: "F_BOT1" }] }] })),
@@ -96,6 +102,7 @@ export function mockSlack(): MockSlack {
         },
       })),
     },
+    oauth: { v2: { access: vi.fn(async () => ({ ok: true, authed_user: { id: "U_ALICE", access_token: "xoxp-alice" } })) } },
     chat: {
       postMessage: vi.fn(async () => ({ ok: true, ts: `${Date.now() / 1000}` })),
       postEphemeral: vi.fn(async () => ({ ok: true })),
@@ -125,6 +132,11 @@ export interface BridgeOverrides {
   linkPromptMessage?: string | null;
   resolveButtonLabel?: string | null;
   reopenButtonLabel?: string | null;
+  helperChannel?: string | null;
+  helperAutoProvision?: "off" | "existing" | "all";
+  helperOffboarding?: "keep" | "unlink";
+  helperMaxBatch?: number;
+  helperLinkPrompt?: string | null;
 }
 
 /**
@@ -180,6 +192,11 @@ export async function addBridge(ctx: TestContext, over: BridgeOverrides, chatwoo
     reactionResolve: over.reactionResolve === undefined ? "white_check_mark" : over.reactionResolve,
     reactionAssign: over.reactionAssign === undefined ? "eyes" : over.reactionAssign,
     resolvedEmoji: over.resolvedEmoji === undefined ? "white_check_mark" : over.resolvedEmoji,
+    helperChannel: over.helperChannel ?? null,
+    helperAutoProvision: over.helperAutoProvision ?? "off",
+    helperOffboarding: over.helperOffboarding ?? "unlink",
+    helperLinkPrompt: over.helperLinkPrompt === undefined ? "Link your account for <#{channel}>: {link}" : over.helperLinkPrompt,
+    ...(over.helperMaxBatch !== undefined ? { helperMaxBatch: over.helperMaxBatch } : {}),
   });
   await ctx.bridges.reload();
   // Swap the real client for the mock so nothing hits the network.
