@@ -15,6 +15,7 @@ oauth_config:
       - chat:write
       - chat:write.customize
       - channels:history
+      - groups:history
       - channels:read
       - reactions:read
       - reactions:write
@@ -32,6 +33,7 @@ settings:
     request_url: ${opts.publicUrl}/slack/events/${opts.slug}
     bot_events:
       - message.channels
+      - message.groups
       - reaction_added
       - member_joined_channel
       - member_left_channel
