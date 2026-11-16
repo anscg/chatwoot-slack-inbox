@@ -125,6 +125,36 @@ describe("provisioning", () => {
     expect(await findHelperMember(ctx.db, bridge.row.id, "U_ONE")).toBeUndefined();
   });
 
+  it("records a provisioned helper as an agent and adds them to the bridge's inbox", async () => {
+    const { ctx, bridge } = await withHelpers({ members: ["U_TWO"] });
+    const [result] = await provisionHelpers(ctx, bridge, ["U_TWO"], { actor: "U_ADMIN" });
+    const agent = (await ctx.db.select().from(agents).where(eq(agents.slackUserId, "U_TWO")))[0];
+    // Without this row their thread replies are filed as the asker's own messages.
+    expect(agent).toMatchObject({ chatwootAgentId: result!.chatwootUserId, email: "u_two@example.com", emailSource: "chatwoot" });
+    expect(agent!.slackUserTokenEnc).toBeNull();
+    expect(ctx.chatwootMock.addInboxMembers).toHaveBeenCalledWith(bridge.row.chatwootInboxId, [result!.chatwootUserId], bridge.apiToken);
+  });
+
+  it("adds somebody already on the account to the inbox too, without replacing their link", async () => {
+    const { ctx, bridge } = await withHelpers({ members: ["U_ON"] });
+    ctx.chatwootMock.listAgents.mockResolvedValue([{ id: 11, name: "On", email: "u_on@example.com" }]);
+    await ctx.db.insert(agents).values({ slackUserId: "U_ON", chatwootAgentId: 11, email: "on@hackclub.com", emailSource: "hackclub", slackUserTokenEnc: "tok" });
+    await provisionHelpers(ctx, bridge, ["U_ON"], { actor: "U_ADMIN" });
+    const agent = (await ctx.db.select().from(agents).where(eq(agents.slackUserId, "U_ON")))[0];
+    expect(agent).toMatchObject({ chatwootAgentId: 11, email: "on@hackclub.com", emailSource: "hackclub", slackUserTokenEnc: "tok" });
+    expect(ctx.chatwootMock.addInboxMembers).toHaveBeenCalledWith(bridge.row.chatwootInboxId, [11], bridge.apiToken);
+  });
+
+  it("keeps the provisioning when the inbox cannot be joined, and says so", async () => {
+    const { ctx, bridge } = await withHelpers({ members: ["U_TWO"] });
+    ctx.chatwootMock.addInboxMembers.mockRejectedValue(new Error("boom"));
+    const [result] = await provisionHelpers(ctx, bridge, ["U_TWO"], { actor: "U_ADMIN" });
+    expect(result!.ok).toBe(true);
+    expect((await findHelperMember(ctx.db, bridge.row.id, "U_TWO"))!.state).toBe("provisioned");
+    const events = await listHelperEvents(ctx.db, bridge.row.id);
+    expect(events.some((e) => e.action === "failed" && /inbox/.test(e.detail ?? ""))).toBe(true);
+  });
+
   it("refuses a batch bigger than the bridge allows", async () => {
     const { ctx, bridge } = await withHelpers({ members: [], maxBatch: 2 });
     await expect(provisionHelpers(ctx, bridge, ["U_A", "U_B", "U_C"], { actor: "U_ADMIN" })).rejects.toThrow(/limit is 2/);

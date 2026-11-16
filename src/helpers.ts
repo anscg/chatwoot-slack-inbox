@@ -7,7 +7,7 @@ import { helperEvents, helperMembers, bridges, type HelperMember, type HelperSta
 import { log } from "./logger.js";
 import { HELPER_LINK_ASK_COOLDOWN_MS } from "./messages.js";
 import { PermanentError } from "./retry.js";
-import { findAgentBySlackUser } from "./store.js";
+import { findAgentBySlackUser, upsertAgent } from "./store.js";
 import { postDirectMessage } from "./slack/post.js";
 import { getSlackProfile } from "./slack/users.js";
 
@@ -354,6 +354,7 @@ export async function provisionHelpers(
         provisionedAt: tracked.get(slackUserId)?.provisionedAt ?? new Date(),
       });
       await note(ctx.db, row.id, "provisioned", slackUserId, "already an agent on the account; linked", opts.actor);
+      await finishProvisioning(ctx, bridge, slackUserId, c.chatwootUserId, c.email, opts.actor);
       results.push({ ...common, ok: true, detail: "already an agent; linked", chatwootUserId: c.chatwootUserId });
       continue;
     }
@@ -372,6 +373,7 @@ export async function provisionHelpers(
       const detail = c.bucket === "existing" ? `added ${c.email} to the account` : `invited ${c.email} as a new Chatwoot user`;
       await note(ctx.db, row.id, "provisioned", slackUserId, detail, opts.actor);
       log.info("helper provisioned", { bridge: row.name, slackUserId, chatwootUserId: agent.id, bucket: c.bucket, by: opts.actor ?? "auto" });
+      await finishProvisioning(ctx, bridge, slackUserId, agent.id, agent.email ?? c.email, opts.actor);
       results.push({ ...common, ok: true, detail, chatwootUserId: agent.id });
     } catch (err) {
       const message = err instanceof ChatwootHttpError ? `Chatwoot ${err.status}: ${err.body.slice(0, 200)}` : err instanceof Error ? err.message : String(err);
@@ -382,6 +384,51 @@ export async function provisionHelpers(
     }
   }
   return results;
+}
+
+/**
+ * The parts of provisioning that happen after Chatwoot has the person on the account. Without
+ * these a provisioned helper is an agent in name only:
+ *
+ *  - No `agents` row means the Slack side does not know them, so every reply they write in a
+ *    ticket thread is filed as the asker's own message (`[Not OP] Name: …`) instead of as theirs.
+ *    The row is written with the Chatwoot user it was just matched to; it never replaces a link
+ *    that already names a Chatwoot user, and it carries no tokens, so `/link` still adds those.
+ *  - Not being in the bridge's inbox means Chatwoot shows them no conversations at all.
+ *
+ * Neither failure undoes the provisioning: both are logged and noted on the roster.
+ */
+async function finishProvisioning(
+  ctx: AppContext,
+  bridge: Bridge,
+  slackUserId: string,
+  chatwootUserId: number,
+  email: string | null | undefined,
+  actor: string | null,
+): Promise<void> {
+  const row = bridge.row;
+  try {
+    const existing = await findAgentBySlackUser(ctx.db, slackUserId);
+    if (!existing?.chatwootAgentId) {
+      await upsertAgent(ctx.db, {
+        slackUserId,
+        chatwootAgentId: chatwootUserId,
+        ...(email ? { email, emailSource: "chatwoot" as const } : {}),
+      });
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await note(ctx.db, row.id, "failed", slackUserId, `provisioned, but could not record them as an agent: ${message}`, actor);
+    log.warn("could not record a provisioned helper as an agent", { bridge: row.name, slackUserId, error: message });
+  }
+  if (row.chatwootInboxId === null) return;
+  try {
+    await bridge.chatwoot.addInboxMembers(row.chatwootInboxId, [chatwootUserId], bridge.apiToken);
+  } catch (err) {
+    const message = err instanceof ChatwootHttpError ? `Chatwoot ${err.status}: ${err.body.slice(0, 200)}` : err instanceof Error ? err.message : String(err);
+    await note(ctx.db, row.id, "failed", slackUserId, `provisioned, but could not add them to the inbox: ${message}`, actor);
+    log.warn("could not add a provisioned helper to the inbox", { bridge: row.name, slackUserId, error: message });
+  }
 }
 
 /**
