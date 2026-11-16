@@ -132,13 +132,15 @@ Having linked is not itself evidence, though. What counts is where the address c
 
 Only the first is trusted for provisioning. That last case is the trap: a Hack Club account's Chatwoot address is often not the one on their Slack profile, so inviting the Slack address hands them a *second* Chatwoot login instead of the account they already use.
 
-**So the bridge asks rather than guesses.** Anyone it cannot identify gets one direct message from the bridge bot pointing them at `/link` — at most once a week per person, never to a bot, and never to somebody a human has skipped. The moment they link and Chatwoot recognises them, they are provisioned automatically, with no further clicks by anyone. That holds even on a bridge set to provision nobody automatically: having been sent the message *is* the decision, and it still never invites anyone Chatwoot has not already got a user for. That is the whole loop:
+**So the bridge asks rather than guesses.** Anyone who has not been through `/link` gets one direct message from the bridge bot pointing them at it — whether or not they could be provisioned, because an agent who never linked still has their Chatwoot replies posted to Slack by the bot instead of by them. That is at most once a week per person, never to a bot, and never to somebody a human has skipped. The moment they link and Chatwoot recognises them, they are provisioned automatically, with no further clicks by anyone. That holds even on a bridge set to provision nobody automatically: having been sent the message *is* the decision, and it still never invites anyone Chatwoot has not already got a user for. That is the whole loop:
 
 ```
 joins #helpers ──▶ can we identify them?
-                     yes ──▶ provisioned
+                     yes ──▶ provisioned ──▶ not linked yet? DM: "link your account"
                      no  ──▶ DM: "link your account" ──▶ they link ──▶ provisioned
 ```
+
+Provisioning also records them as an agent on the Slack side (so their thread replies count as theirs, not the asker's) and adds them to the bridge's inbox (Chatwoot shows an agent nothing outside their inboxes).
 
 The message text is a per-bridge setting (`{link}` and `{channel}` are substituted); blank never asks. It goes out on a join under the `existing` and `all` policies, and the review screen has an **Ask N to link** button for doing it to people already in the channel. Asking creates nothing in Chatwoot, and the same batch limit and burst guard cover it, so a mass invite cannot become a mass DM either. Needs `im:write` on the bridge's Slack app.
 
