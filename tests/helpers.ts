@@ -59,6 +59,7 @@ export function mockChatwoot(): MockChatwoot {
     listAgents: vi.fn(async () => []),
     createAgent: vi.fn(async ({ name, email }: { name: string; email: string }) => ({ id: 900 + email.length, name, email })),
     removeAgentFromAccount: vi.fn(async () => undefined),
+    addInboxMembers: vi.fn(async () => undefined),
     whoAmI: vi.fn(async () => ({ id: 7, name: "Agent", email: "agent@example.com", accounts: [{ id: 1, name: "Acct" }] })),
     listInboxes: vi.fn(async () => []),
   } as unknown as MockChatwoot;

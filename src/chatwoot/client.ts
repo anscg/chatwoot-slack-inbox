@@ -247,6 +247,19 @@ export class ChatwootClient {
     await this.json("DELETE", `${this.appBase}/agents/${agentId}`, { token: apiToken ?? this.opts.apiToken });
   }
 
+  /**
+   * Make these users members of an inbox. Chatwoot only shows an agent the conversations in
+   * inboxes they belong to, so an agent on the account but in no inbox sees an empty dashboard.
+   * POST adds (it never removes anyone); users already in the inbox are ignored by Chatwoot.
+   * Requires the token to belong to an administrator of the account.
+   */
+  async addInboxMembers(inboxId: number, userIds: number[], apiToken?: string): Promise<void> {
+    await this.json("POST", `${this.appBase}/inbox_members`, {
+      token: apiToken ?? this.opts.apiToken,
+      body: { inbox_id: inboxId, user_ids: userIds },
+    });
+  }
+
   /** Validate an access token and return its user profile, including the accounts it belongs to. */
   async whoAmI(apiToken: string): Promise<ChatwootProfile> {
     return this.json<ChatwootProfile>("GET", `${this.opts.baseUrl}/api/v1/profile`, { token: apiToken });
