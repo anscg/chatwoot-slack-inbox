@@ -101,6 +101,7 @@ export interface HelperCandidate {
   state: HelperState | null;
   inChannel: boolean;
   linkAskedAt: string | null;
+  slackLinked: boolean;
 }
 export interface AskResult {
   slackUserId: string;

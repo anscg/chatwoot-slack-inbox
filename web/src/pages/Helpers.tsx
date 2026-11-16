@@ -346,17 +346,18 @@ export function HelpersPanel({ bridge, onClose }: { bridge: Bridge; onClose: () 
   );
 }
 
-/** Somebody we could ask to link: unconfirmed, a person, and not nagged in the last week. */
+/** Somebody we could ask to link: not linked yet, a person, and not nagged in the last week. */
 function askable(c: HelperCandidate): boolean {
-  if (c.bucket !== "invite" && c.bucket !== "blocked") return false;
+  if (c.slackLinked) return false;
   if (c.bucket === "blocked" && c.reason.includes("bot")) return false;
-  if (c.state === "provisioned" || c.state === "skipped") return false;
+  if (c.state === "skipped") return false;
   return !c.linkAskedAt || Date.now() - new Date(c.linkAskedAt).getTime() > 7 * 24 * 60 * 60_000;
 }
 
 /** Is there anything at all to do for this person? Drives what is ticked after a review. */
 function actionable(c: HelperCandidate): boolean {
-  if (c.state === "provisioned" || c.state === "skipped") return false;
+  if (c.state === "skipped") return false;
+  if (c.state === "provisioned") return askable(c);
   return c.bucket === "existing" || askable(c);
 }
 

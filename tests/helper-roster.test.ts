@@ -312,12 +312,33 @@ describe("asking people to link instead of guessing an address", () => {
     expect((await listHelperEvents(ctx.db, bridge.row.id)).some((e) => e.action === "asked")).toBe(true);
   });
 
-  it("provisions a confirmed joiner and does not pester them", async () => {
+  it("provisions a confirmed joiner who has already linked, and does not pester them", async () => {
     const { ctx, bridge } = await withHelpers({ auto: "existing" });
-    await ctx.db.insert(agents).values({ slackUserId: "U_KNOWN", chatwootAgentId: 22, email: "known@hackclub.com" });
+    await ctx.db.insert(agents).values({ slackUserId: "U_KNOWN", chatwootAgentId: 22, email: "known@hackclub.com", slackUserTokenEnc: "tok" });
     await recordHelperJoin(ctx, { bridgeId: bridge.row.id, slackUserId: "U_KNOWN" });
     expect(ctx.chatwootMock.createAgent).toHaveBeenCalledTimes(1);
     expect(dms(ctx)).toEqual([]);
+  });
+
+  it("still asks a joiner it provisioned to link, when they have not linked Slack", async () => {
+    // Provisioned is not linked: without the Slack token their Chatwoot replies reach Slack from the bot.
+    const { ctx, bridge } = await withHelpers({ auto: "all" });
+    await recordHelperJoin(ctx, { bridgeId: bridge.row.id, slackUserId: "U_NEW" });
+    expect(ctx.chatwootMock.createAgent).toHaveBeenCalledTimes(1);
+    expect((await findHelperMember(ctx.db, bridge.row.id, "U_NEW"))!.state).toBe("provisioned");
+    expect(dms(ctx)).toEqual([["U_NEW", "Link your account for <#C_TEAM>: https://bridge.test/link"]]);
+  });
+
+  it("asks an already-provisioned helper who never linked, but not one who did", async () => {
+    const { ctx, bridge } = await withHelpers({ auto: "all" });
+    await provisionHelpers(ctx, bridge, ["U_OLD", "U_DONE"], { actor: "U_ADMIN" });
+    await ctx.db.update(agents).set({ slackUserTokenEnc: "tok" }).where(eq(agents.slackUserId, "U_DONE"));
+    const results = await askHelpersToLink(ctx, bridge, ["U_OLD", "U_DONE"], { actor: "U_ADMIN" });
+    expect(results.map((r) => [r.slackUserId, r.ok])).toEqual([
+      ["U_OLD", true],
+      ["U_DONE", false],
+    ]);
+    expect(dms(ctx).map(([to]) => to)).toEqual(["U_OLD"]);
   });
 
   it("says nothing at all while auto-provisioning is off", async () => {

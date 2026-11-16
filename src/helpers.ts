@@ -58,6 +58,12 @@ export interface HelperCandidate {
   inChannel: boolean;
   /** When we last asked them to link, so the panel does not offer to nag them again. */
   linkAskedAt: string | null;
+  /**
+   * Have they been through /link (we hold their Slack user token)? Being an agent on the account
+   * is not the same thing: without the link, what they write in Chatwoot reaches Slack from the
+   * bridge bot instead of from them. This, not the bucket, is what decides whether to ask.
+   */
+  slackLinked: boolean;
 }
 
 /**
@@ -171,6 +177,7 @@ async function resolve(ctx: AppContext, bridge: Bridge, slackUserId: string, dir
     state: tracked?.state ?? null,
     inChannel: tracked?.inChannel ?? true,
     linkAskedAt: tracked?.linkAskedAt?.toISOString() ?? null,
+    slackLinked: false,
   };
   let name = tracked?.name ?? slackUserId;
   let slackEmail: string | undefined;
@@ -186,6 +193,7 @@ async function resolve(ctx: AppContext, bridge: Bridge, slackUserId: string, dir
   }
 
   const linked = await findAgentBySlackUser(ctx.db, slackUserId);
+  base.slackLinked = Boolean(linked?.slackUserTokenEnc);
   const email = linked?.email ?? slackEmail ?? null;
   // /link records where the address came from. Rows written before it did fall back to the old
   // guess: a stored address that differs from Slack's must have come from somewhere better.
@@ -463,17 +471,13 @@ export async function askHelpersToLink(
       out.push({ slackUserId, ok: false, detail: "skipped by a human" });
       continue;
     }
-    if (existing?.state === "provisioned") {
-      out.push({ slackUserId, ok: false, detail: "already provisioned" });
-      continue;
-    }
     if (existing?.linkAskedAt && now.getTime() - existing.linkAskedAt.getTime() < HELPER_LINK_ASK_COOLDOWN_MS) {
       out.push({ slackUserId, ok: false, detail: `already asked on ${existing.linkAskedAt.toISOString().slice(0, 10)}` });
       continue;
     }
     const c = await resolve(ctx, bridge, slackUserId, dir, existing);
-    if (isConfirmed(c)) {
-      out.push({ slackUserId, ok: false, detail: "nothing to ask: Chatwoot already knows them" });
+    if (c.slackLinked) {
+      out.push({ slackUserId, ok: false, detail: "nothing to ask: they have already linked" });
       continue;
     }
     if (c.bucket === "blocked" && c.reason.includes("bot")) {
@@ -627,10 +631,10 @@ export async function recordHelperJoin(ctx: AppContext, job: HelperJoinedJob): P
     actor: null,
     allow: row.helperAutoProvision === "all" ? "all" : "existing",
   });
-  // Not provisioned because we cannot confirm who they are in Chatwoot? Ask, rather than guess.
-  if (!result?.ok && result?.bucket !== "member") {
-    await askHelpersToLink(ctx, bridge, [job.slackUserId], { actor: null });
-  }
+  // Ask everyone who has not linked yet. Somebody we could not identify needs it to get an account
+  // at all; somebody we just provisioned needs it for their Chatwoot replies to reach Slack as them.
+  // askHelpersToLink skips the already-linked, bots, skips and anyone asked in the last week.
+  if (result) await askHelpersToLink(ctx, bridge, [job.slackUserId], { actor: null });
 }
 
 /** Somebody left a helper channel. Recorded always; unlinked from Chatwoot only if configured. */
